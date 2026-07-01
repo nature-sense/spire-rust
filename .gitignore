@@ -1,0 +1,23 @@
+# Rust build artifacts
+core/target/
+
+# Node.js dependencies
+extension/node_modules/
+
+# TypeScript compiled output
+extension/dist/
+
+# Copied Rust binary (copied from core/target/release/ during build)
+extension/bin/
+
+# SeleneDB Write-Ahead Log persistence files (runtime data)
+*.wal
+
+# VS Code extension packages
+*.vsix
+
+# macOS
+.DS_Store
+
+# IDE/editor local settings (keep shared .vscode/*.json)
+.vscode/settings.json

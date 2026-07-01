@@ -1,0 +1,33 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Rust Core",
+      "type": "shell",
+      "command": "cargo build --release",
+      "options": {
+        "cwd": "${workspaceFolder}/core"
+      },
+      "group": "build",
+      "problemMatcher": ["$rustc"]
+    },
+    {
+      "label": "Build Extension",
+      "type": "shell",
+      "command": "npm run compile",
+      "options": {
+        "cwd": "${workspaceFolder}/extension"
+      },
+      "group": "build",
+      "dependsOn": ["Build Rust Core"],
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "Copy Binary",
+      "type": "shell",
+      "command": "cp ${workspaceFolder}/core/target/release/spire-rust ${workspaceFolder}/extension/bin/",
+      "dependsOn": ["Build Rust Core"],
+      "problemMatcher": []
+    }
+  ]
+}
