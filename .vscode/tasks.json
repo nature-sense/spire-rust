@@ -16,7 +16,7 @@
       "type": "shell",
       "command": "npm run compile",
       "options": {
-        "cwd": "${workspaceFolder}/extension"
+        "cwd": "${workspaceFolder}/spire-vscode"
       },
       "group": "build",
       "dependsOn": ["Build Rust Core"],
@@ -25,7 +25,7 @@
     {
       "label": "Copy Binary",
       "type": "shell",
-      "command": "cp ${workspaceFolder}/core/target/release/spire-rust ${workspaceFolder}/extension/bin/",
+      "command": "cp ${workspaceFolder}/core/target/release/spire-rust ${workspaceFolder}/spire-vscode/bin/",
       "dependsOn": ["Build Rust Core"],
       "problemMatcher": []
     }

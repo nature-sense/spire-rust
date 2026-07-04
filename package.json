@@ -3,11 +3,11 @@
   "private": true,
   "scripts": {
     "build:rust": "cd core && cargo build --release",
-    "build:ts": "cd extension && npm run compile",
-    "build": "pnpm run build:rust && pnpm run build:ts && cp core/target/release/spire-rust extension/bin/",
-    "dev": "pnpm run build && code --extensionDevelopmentPath=./extension --disable-extensions",
-    "test": "pnpm run build:ts && cd extension && npm run test",
-    "package": "pnpm run build && cd extension && vsce package"
+    "build:ts": "cd spire-vscode && npm run compile",
+    "build": "pnpm run build:rust && pnpm run build:ts && cp core/target/release/spire-rust spire-vscode/bin/",
+    "dev": "pnpm run build && code --extensionDevelopmentPath=./spire-vscode --disable-extensions",
+    "test": "pnpm run build:ts && cd spire-vscode && npm run test",
+    "package": "pnpm run build && cd spire-vscode && vsce package"
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",
