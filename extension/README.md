@@ -201,3 +201,9 @@ The extension is published under the publisher name `naturesense`.
 ### Debugging
 
 The `.vscode/launch.json` and `.vscode/tasks.json` files at the repository root provide pre-configured debug configurations. The Rust process logs to stderr, which appears in the VS Code console (`Developer: Toggle Developer Tools`).
+
+---
+
+## License
+
+GNU GPLv3 — see [LICENSE](../LICENSE) for details.

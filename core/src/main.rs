@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 NatureSense
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use anyhow::Result;
 use rust_mcp_sdk::{
     mcp_server::{server_runtime, McpServerOptions},
@@ -13,8 +29,10 @@ mod graph;
 mod mcp;
 mod models;
 
-use crate::models::embedding::Embedder;
+use crate::mcp::client::McpClientManager;
 use crate::mcp::server::SpireMcpHandler;
+use crate::models::embedding::Embedder;
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,7 +49,7 @@ async fn main() -> Result<()> {
     // Initialize the embedding model (all-MiniLM-L6-v2 via Candle)
     // This downloads ~85 MB of model weights on first run to ~/.cache/huggingface/
     tracing::info!("Initializing embedding model...");
-    let embedder = match embedder::candle_embedder::create_embedder() {
+    let _embedder = match embedder::candle_embedder::create_embedder() {
         Ok(emb) => {
             tracing::info!(
                 "Embedding model loaded successfully ({} dimensions)",
@@ -47,7 +65,7 @@ async fn main() -> Result<()> {
             return Err(e);
         }
     };
-    let embedder = Arc::new(embedder);
+    let _embedder = Arc::new(_embedder);
 
     // Initialize the knowledge graph with WAL persistence.
     let wal_path = std::env::var("SPIRE_WAL_PATH")
@@ -59,6 +77,31 @@ async fn main() -> Result<()> {
         graph_db.node_count(),
         graph_db.edge_count()
     );
+
+    // Initialize the MCP client manager and connect to external servers.
+    let mut mcp_client_manager = McpClientManager::new();
+    match mcp_client_manager.load_config() {
+        Ok(Some(path)) => {
+            tracing::info!("Loaded MCP server config from {}", path.display());
+            mcp_client_manager.connect_all().await;
+            let connected = mcp_client_manager.connected_servers();
+            if connected.is_empty() {
+                tracing::warn!("No MCP servers connected successfully");
+            } else {
+                tracing::info!(
+                    "Connected to {} MCP server(s): {:?}",
+                    connected.len(),
+                    connected
+                );
+            }
+        }
+        Ok(None) => {
+            tracing::info!("No MCP server config found — running without external MCP clients");
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load MCP server config: {:#}", e);
+        }
+    }
 
     // Build server info
     let server_details = InitializeResult {
@@ -77,7 +120,7 @@ async fn main() -> Result<()> {
             tools: Some(ServerCapabilitiesTools { list_changed: None }),
             ..Default::default()
         },
-        protocol_version: ProtocolVersion::V2025_11_28.into(),
+        protocol_version: LATEST_PROTOCOL_VERSION.into(),
         instructions: None,
         meta: None,
     };

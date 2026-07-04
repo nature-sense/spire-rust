@@ -1856,6 +1856,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc0fef456e4baa96da950455cd02c081ca953b141298e41db3fc7e36b1da849c"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hf-hub"
 version = "1.0.0-rc.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4395,6 +4401,7 @@ dependencies = [
  "candle-transformers",
  "chrono",
  "futures",
+ "hex",
  "hf-hub",
  "md-5",
  "rand 0.8.6",
@@ -4407,6 +4414,7 @@ dependencies = [
  "selene-db-persist",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "time",
  "tokenizers 0.21.4",

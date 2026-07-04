@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 NatureSense
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -15,9 +31,10 @@ use rust_mcp_sdk::{StdioTransport, ToMcpServerHandlerCore, TransportOptions};
 use async_trait::async_trait;
 use tonari_actor::System;
 
-use spire_rust::actors::{
-    CoordinatorActor, LlmActor, MemoryGraphActor, ProgressActor,
-};
+use spire_rust::actors::coordinator::CoordinatorActor;
+use spire_rust::actors::llm::LlmActor;
+use spire_rust::actors::memory_graph::MemoryGraphActor;
+use spire_rust::actors::progress::ProgressActor;
 use spire_rust::models::embedding::Embedder;
 
 /// A no-op embedder for testing.
@@ -134,7 +151,8 @@ async fn test_actor_system_initialization() {
     let mut system = tonari_actor::System::new("spire-test");
 
     let embedder = Arc::new(TestEmbedder);
-    let memory_graph_addr = system.spawn(MemoryGraphActor::new(embedder)).unwrap();
+    let graph_db = Arc::new(spire_rust::graph::GraphDb::new_in_memory().unwrap());
+    let memory_graph_addr = system.spawn(MemoryGraphActor::new(graph_db, embedder)).unwrap();
     let llm_addr = system.spawn(LlmActor::new()).unwrap();
     let progress_addr = system.spawn(ProgressActor::new()).unwrap();
 

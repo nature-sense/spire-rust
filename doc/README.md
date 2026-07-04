@@ -43,3 +43,6 @@ This is the primary reference document for the `core/` actor system. It covers:
 - [Root README](../README.md) — Project overview and quick start
 - [Core README](../core/README.md) — Rust MCP server documentation
 - [Extension README](../extension/README.md) — VS Code extension documentation
+- [CONTRIBUTING.md](../CONTRIBUTING.md) — Contribution guidelines
+- [CHANGELOG.md](../CHANGELOG.md) — Release history
+

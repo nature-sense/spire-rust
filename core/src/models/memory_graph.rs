@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 NatureSense
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,6 +24,7 @@ use thiserror::Error;
 // ============================================================================
 
 /// Typed errors for schema constraint violations.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, Error)]
 pub enum SchemaError {
     #[error("Duplicate node: ({type_name}, {name}) already exists")]
@@ -24,7 +41,23 @@ pub enum SchemaError {
         from: String,
         to: String,
     },
+    // === AGENT INFRASTRUCTURE ERRORS ===
+    #[error("Duplicate error pattern: fingerprint {fingerprint} already exists")]
+    DuplicateError {
+        fingerprint: String,
+    },
+    #[error("Duplicate step order {order} in plan {plan_id}")]
+    DuplicateStepOrder {
+        plan_id: String,
+        order: u32,
+    },
+    #[error("Acyclic precedes violation: adding precedes from {from} to {to} would create a cycle")]
+    AcyclicPrecedesViolation {
+        from: String,
+        to: String,
+    },
 }
+
 
 // ============================================================================
 // Node Types
@@ -32,8 +65,10 @@ pub enum SchemaError {
 
 
 /// The type of a graph node, mirroring the TypeScript `NodeType` union.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum NodeType {
+    #[default]
+
     Project,
     Entity,
     Decision,
@@ -44,6 +79,23 @@ pub enum NodeType {
     Standard,
     Conversation,
     Session,
+    // === AGENT INFRASTRUCTURE ===
+    #[serde(rename = "agent")]
+    Agent,
+    #[serde(rename = "tool")]
+    Tool,
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "plan_step")]
+    PlanStep,
+    #[serde(rename = "execution")]
+    Execution,
+    #[serde(rename = "task_result")]
+    TaskResult,
+    #[serde(rename = "artifact")]
+    Artifact,
+    #[serde(rename = "error_pattern")]
+    ErrorPattern,
     /// Fallback for code-analysis node types (File, Function, Class, etc.)
     #[serde(other)]
     Unknown,
@@ -65,8 +117,9 @@ pub struct GraphNode {
 }
 
 /// Input for creating a new node, mirroring the TypeScript `NodeInput` interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeInput {
+
     pub node_type: NodeType,
     pub subtype: Option<String>,
     pub name: String,
@@ -81,8 +134,9 @@ pub struct NodeInput {
 /// - `None` — don't change this field
 /// - `Some(None)` — explicitly clear/set to null
 /// - `Some(Some(v))` — set to value `v`
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeUpdate {
+
     pub node_type: Option<NodeType>,
     pub subtype: Option<Option<String>>,
     pub name: Option<String>,
@@ -92,8 +146,9 @@ pub struct NodeUpdate {
 }
 
 /// Filter for querying nodes, mirroring the TypeScript `NodeFilter` interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeFilter {
+
     pub node_type: Option<NodeType>,
     pub subtype: Option<String>,
     pub name: Option<String>,
@@ -138,6 +193,25 @@ pub enum RelationshipType {
     SessionWorkedOn,
     #[serde(rename = "informed_by")]
     InformedBy,
+    // === AGENT INFRASTRUCTURE ===
+    #[serde(rename = "uses_tool")]
+    UsesTool,
+    #[serde(rename = "follows_plan")]
+    FollowsPlan,
+    #[serde(rename = "contains_step")]
+    ContainsStep,
+    #[serde(rename = "precedes")]
+    Precedes,
+    #[serde(rename = "produced")]
+    Produced,
+    #[serde(rename = "encountered_error")]
+    EncounteredError,
+    #[serde(rename = "resolved_by")]
+    ResolvedBy,
+    #[serde(rename = "part_of_execution")]
+    PartOfExecution,
+    #[serde(rename = "executed_by")]
+    ExecutedBy,
     /// Fallback for code-analysis relationship types (Calls, Imports, etc.)
     #[serde(other)]
     Unknown,
@@ -230,8 +304,9 @@ pub struct ProjectStats {
 }
 
 /// Options for context search, mirroring the TypeScript `SearchOptions` interface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SearchOptions {
+
     pub top_k: Option<usize>,
     pub threshold: Option<f64>,
     pub node_types: Option<Vec<NodeType>>,
@@ -288,3 +363,101 @@ pub struct MemoryEntry {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
+
+// ============================================================================
+// Agent Infrastructure Types
+// ============================================================================
+
+/// Agent context returned by hybrid retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContext {
+    pub agent: GraphNode,
+    pub tools: Vec<GraphNode>,
+    pub plan: Option<GraphNode>,
+    pub steps: Vec<GraphNode>,
+    pub recent_successes: Vec<GraphNode>,
+    pub similar_successes: Vec<GraphNode>,
+    pub similar_errors: Vec<GraphNode>,
+    pub artifacts: Vec<GraphNode>,
+    pub current_goal: String,
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Agent execution status.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExecutionStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "success")]
+    Success,
+    #[serde(rename = "failed")]
+    Failed,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+}
+
+/// Input for executing a tool.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolExecution {
+    pub tool_name: String,
+    pub arguments: HashMap<String, serde_json::Value>,
+    pub timeout_ms: Option<u64>,
+    pub retry_count: Option<u8>,
+}
+
+/// Error fingerprint for deduplication.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ErrorFingerprint {
+    pub error_type: String,
+    pub message_hash: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+}
+
+impl ErrorFingerprint {
+    #[allow(dead_code)]
+    pub fn generate(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let input = format!(
+            "{}:{}:{:?}:{:?}:{:?}",
+            self.error_type, self.message_hash, self.file, self.line, self.column
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(input.as_bytes());
+        format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+}
+
+/// Plan step ordering helper.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStepOrder {
+    pub order: u32,
+    pub parallel_group: Option<String>,
+}
+
+/// Plan step dependency helper.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStepDependency {
+    pub depends_on: Vec<String>,
+    pub condition: Option<String>,
+}
+
+/// Suggested fix for an error pattern.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SuggestedFix {
+    pub before: String,
+    pub after: String,
+    pub line: u32,
+    pub file: String,
+    pub description: Option<String>,
+}
+

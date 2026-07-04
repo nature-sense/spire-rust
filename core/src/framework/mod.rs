@@ -14,8 +14,10 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-pub mod analysis;
-pub mod embedding;
-pub mod graph;
-pub mod memory_graph;
+mod trait_;
+mod system;
+mod messages;
 
+pub use trait_::Actor;
+pub use system::ActorSystem;
+pub use messages::*;

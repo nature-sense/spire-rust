@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 NatureSense
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //! Graph database wrapper around SeleneDB.
 //!
 //! This module provides a high-level wrapper around SeleneDB's graph database,
@@ -7,22 +23,39 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use selene_core::changeset::{SchemaChange, SchemaVectorIndexKind};
+
+use selene_core::db_string::DbString;
 use selene_core::identity::{EdgeId, GraphId, NodeId};
 use selene_core::label_set::LabelSet;
 use selene_core::property_map::PropertyMap;
 use selene_core::value::Value;
-use selene_core::vector::VectorMetric;
+use selene_core::VectorMetric;
+use selene_core::VectorValue;
 use selene_graph::graph::SeleneGraph;
 use selene_graph::shared::SharedGraph;
-use selene_graph::write_txn::WriteTxn;
-use selene_graph::mutator::Mutator;
-use selene_graph::vector_index::VectorIndexConfig;
-use selene_graph::vector_search::VectorSearchHit;
-use selene_graph::GraphResult;
 use selene_persist::WalConfig;
 
-use crate::models::memory_graph::{GraphEdge, GraphNode};
+/// A low-level node representation from SeleneDB.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SeleneNode {
+    pub id: String,
+    pub labels: Vec<String>,
+    pub properties: std::collections::HashMap<String, Value>,
+}
+
+/// A low-level edge representation from SeleneDB.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct SeleneEdge {
+    pub id: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub properties: std::collections::HashMap<String, Value>,
+}
 
 /// A high-level wrapper around SeleneDB's graph database.
 ///
@@ -39,9 +72,9 @@ pub struct GraphDb {
 impl GraphDb {
     /// Create a new in-memory graph database (no persistence).
     pub fn new_in_memory() -> Result<Self> {
-        let graph_id = GraphId::generate();
+        let graph_id = GraphId::new(1);
         let graph = SeleneGraph::new(graph_id);
-        let shared = SharedGraph::from_graph(graph)
+        let shared = SharedGraph::try_from_graph(graph)
             .map_err(|e| anyhow::anyhow!("Failed to create in-memory graph: {}", e))?;
 
         Ok(Self {
@@ -55,7 +88,7 @@ impl GraphDb {
     /// The WAL file will be created at `wal_path`. If a WAL already exists at
     /// that path, it will be recovered on open.
     pub fn new_with_wal(wal_path: impl AsRef<Path>) -> Result<Self> {
-        let graph_id = GraphId::generate();
+        let graph_id = GraphId::new(1);
         let graph = SeleneGraph::new(graph_id);
         let config = WalConfig::default();
         let shared = SharedGraph::from_graph_with_wal(graph, wal_path.as_ref(), config)
@@ -93,10 +126,15 @@ impl GraphDb {
         let mut txn = self.shared.begin_write();
         let mut mutator = txn.mutator();
 
-        let label_set = LabelSet::from(labels);
+        let label_set = LabelSet::from_iter(
+            labels.into_iter().map(|l| DbString::from_string(l).unwrap()),
+        );
         let mut prop_map = PropertyMap::new();
         for (key, value) in properties {
-            prop_map.insert(key.into(), value);
+            let key_str = key.clone();
+            prop_map
+                .set(DbString::from_string(key).unwrap(), value)
+                .map_err(|e| anyhow::anyhow!("Failed to set property '{}': {}", key_str, e))?;
         }
 
         let node_id = mutator
@@ -110,12 +148,13 @@ impl GraphDb {
     }
 
     /// Get a node by its ID.
-    pub fn get_node(&self, node_id: NodeId) -> Option<GraphNode> {
+    pub fn get_node(&self, node_id: NodeId) -> Option<SeleneNode> {
         let snapshot = self.shared.read();
+
         let labels = snapshot.node_labels(node_id)?;
         let properties = snapshot.node_properties(node_id)?;
 
-        Some(GraphNode {
+        Some(SeleneNode {
             id: node_id.to_string(),
             labels: labels.iter().map(|l| l.to_string()).collect(),
             properties: properties
@@ -130,10 +169,8 @@ impl GraphDb {
         let mut txn = self.shared.begin_write();
         let mut mutator = txn.mutator();
 
-        // Use update_node with empty diff to mark as deleted (tombstone)
-        // SeleneDB uses tombstones for deletion
         mutator
-            .update_node(node_id, selene_graph::graph_types::PropertyDiff::default())
+            .delete_node(node_id)
             .map_err(|e| anyhow::anyhow!("Failed to delete node: {}", e))?;
 
         txn.commit()
@@ -162,11 +199,14 @@ impl GraphDb {
 
         let mut prop_map = PropertyMap::new();
         for (key, value) in properties {
-            prop_map.insert(key.into(), value);
+            let key_str = key.clone();
+            prop_map
+                .set(DbString::from_string(key).unwrap(), value)
+                .map_err(|e| anyhow::anyhow!("Failed to set property '{}': {}", key_str, e))?;
         }
 
         let edge_id = mutator
-            .create_edge(subject, predicate.into(), object, prop_map)
+            .create_edge(DbString::from_string(predicate.to_string()).unwrap(), subject, object, prop_map)
             .map_err(|e| anyhow::anyhow!("Failed to create edge: {}", e))?;
 
         txn.commit()
@@ -176,13 +216,13 @@ impl GraphDb {
     }
 
     /// Get an edge by its ID.
-    pub fn get_edge(&self, edge_id: EdgeId) -> Option<GraphEdge> {
+    pub fn get_edge(&self, edge_id: EdgeId) -> Option<SeleneEdge> {
         let snapshot = self.shared.read();
         let label = snapshot.edge_label(edge_id)?;
         let endpoints = snapshot.edge_endpoints(edge_id)?;
         let properties = snapshot.edge_properties(edge_id)?;
 
-        Some(GraphEdge {
+        Some(SeleneEdge {
             id: edge_id.to_string(),
             subject: endpoints.0.to_string(),
             predicate: label.to_string(),
@@ -200,10 +240,11 @@ impl GraphDb {
         let mut mutator = txn.mutator();
 
         mutator
-            .update_edge(edge_id, selene_graph::graph_types::PropertyDiff::default())
+            .delete_edge(edge_id)
             .map_err(|e| anyhow::anyhow!("Failed to delete edge: {}", e))?;
 
         txn.commit()
+
             .map_err(|e| anyhow::anyhow!("Failed to commit edge deletion: {}", e))?;
 
         Ok(())
@@ -212,17 +253,17 @@ impl GraphDb {
     // ─── Traversal Operations ──────────────────────────────────────────
 
     /// Get outgoing edges from a node.
-    pub fn outgoing_edges(&self, node_id: NodeId) -> Vec<GraphEdge> {
+    pub fn outgoing_edges(&self, node_id: NodeId) -> Vec<SeleneEdge> {
         let snapshot = self.shared.read();
         let mut edges = Vec::new();
 
         if let Some(adj) = snapshot.outgoing_edges(node_id) {
-            for edge_ref in adj.iter() {
-                let edge_id = edge_ref.edge_id();
+            for edge_ref in adj.edges.iter() {
+                let edge_id = edge_ref.edge_id;
                 if let Some(label) = snapshot.edge_label(edge_id) {
                     if let Some(endpoints) = snapshot.edge_endpoints(edge_id) {
                         let properties = snapshot.edge_properties(edge_id).cloned().unwrap_or_default();
-                        edges.push(GraphEdge {
+                        edges.push(SeleneEdge {
                             id: edge_id.to_string(),
                             subject: endpoints.0.to_string(),
                             predicate: label.to_string(),
@@ -241,17 +282,17 @@ impl GraphDb {
     }
 
     /// Get incoming edges to a node.
-    pub fn incoming_edges(&self, node_id: NodeId) -> Vec<GraphEdge> {
+    pub fn incoming_edges(&self, node_id: NodeId) -> Vec<SeleneEdge> {
         let snapshot = self.shared.read();
         let mut edges = Vec::new();
 
         if let Some(adj) = snapshot.incoming_edges(node_id) {
-            for edge_ref in adj.iter() {
-                let edge_id = edge_ref.edge_id();
+            for edge_ref in adj.edges.iter() {
+                let edge_id = edge_ref.edge_id;
                 if let Some(label) = snapshot.edge_label(edge_id) {
                     if let Some(endpoints) = snapshot.edge_endpoints(edge_id) {
                         let properties = snapshot.edge_properties(edge_id).cloned().unwrap_or_default();
-                        edges.push(GraphEdge {
+                        edges.push(SeleneEdge {
                             id: edge_id.to_string(),
                             subject: endpoints.0.to_string(),
                             predicate: label.to_string(),
@@ -270,14 +311,18 @@ impl GraphDb {
     }
 
     /// Find nodes by label.
-    pub fn nodes_with_label(&self, label: &str) -> Vec<GraphNode> {
+    pub fn nodes_with_label(&self, label: &str) -> Vec<SeleneNode> {
         let snapshot = self.shared.read();
         let mut nodes = Vec::new();
 
-        if let Some(bitmap) = snapshot.nodes_with_label(&label.into()) {
-            for node_id in bitmap.iter() {
-                if let Some(node) = self.get_node(NodeId::from(node_id)) {
-                    nodes.push(node);
+        let label_db = DbString::from_string(label.to_string()).unwrap();
+        if let Some(bitmap) = snapshot.nodes_with_label(&label_db) {
+            for raw_row in bitmap.iter() {
+                let row = selene_graph::store::RowIndex::new(raw_row);
+                if let Some(node_id) = snapshot.node_id_for_row(row) {
+                    if let Some(node) = self.get_node(node_id) {
+                        nodes.push(node);
+                    }
                 }
             }
         }
@@ -286,14 +331,18 @@ impl GraphDb {
     }
 
     /// Find edges by label.
-    pub fn edges_with_label(&self, label: &str) -> Vec<GraphEdge> {
+    pub fn edges_with_label(&self, label: &str) -> Vec<SeleneEdge> {
         let snapshot = self.shared.read();
         let mut edges = Vec::new();
 
-        if let Some(bitmap) = snapshot.edges_with_label(&label.into()) {
-            for edge_id in bitmap.iter() {
-                if let Some(edge) = self.get_edge(EdgeId::from(edge_id)) {
-                    edges.push(edge);
+        let label_db = DbString::from_string(label.to_string()).unwrap();
+        if let Some(bitmap) = snapshot.edges_with_label(&label_db) {
+            for raw_row in bitmap.iter() {
+                let row = selene_graph::store::RowIndex::new(raw_row);
+                if let Some(edge_id) = snapshot.edge_id_for_row(row) {
+                    if let Some(edge) = self.get_edge(edge_id) {
+                        edges.push(edge);
+                    }
                 }
             }
         }
@@ -311,28 +360,23 @@ impl GraphDb {
         &self,
         label: &str,
         property: &str,
-        dimensions: usize,
-        metric: VectorMetric,
+        dimensions: u32,
+        kind: SchemaVectorIndexKind,
     ) -> Result<()> {
         let mut txn = self.shared.begin_write();
         let mut mutator = txn.mutator();
 
-        let config = VectorIndexConfig {
-            dimensions,
-            metric,
-            ..Default::default()
+        let change = SchemaChange::VectorIndexCreated {
+            label: DbString::from_string(label.to_string()).unwrap(),
+            property: DbString::from_string(property.to_string()).unwrap(),
+            kind,
+            dimension: dimensions,
+            name: None,
+            hnsw_config: None,
+            ivf_config: None,
         };
 
-        mutator
-            .schema_change(
-                self.graph_id,
-                selene_graph::graph_types::SchemaChange::AddVectorIndex {
-                    label: label.into(),
-                    property: property.into(),
-                    config,
-                },
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create vector index: {}", e))?;
+        mutator.schema_change(self.graph_id, change);
 
         txn.commit()
             .map_err(|e| anyhow::anyhow!("Failed to commit vector index creation: {}", e))?;
@@ -340,28 +384,39 @@ impl GraphDb {
         Ok(())
     }
 
-    /// Perform a vector similarity search.
+    /// Perform an exact vector similarity search.
     ///
     /// Searches for nodes with the given label whose embedding property
-    /// is closest to the query vector.
+    /// is closest to the query vector. Returns results sorted by distance
+    /// (lower is more similar).
     pub fn vector_search(
         &self,
         label: &str,
         property: &str,
-        query_vector: Vec<f32>,
+        query_vector: &[f32],
         limit: usize,
-    ) -> Result<Vec<VectorSearchHit>> {
+    ) -> Result<Vec<(NodeId, f64)>> {
         let snapshot = self.shared.read();
 
-        let index = snapshot
-            .vector_index_for(&label.into(), &property.into())
-            .ok_or_else(|| anyhow::anyhow!("Vector index not found for {}.{}", label, property))?;
+        let vector_value = VectorValue::new(query_vector.to_vec())
+            .map_err(|e| anyhow::anyhow!("Failed to create vector value: {}", e))?;
 
-        let hits = index
-            .search(&query_vector, limit)
+        let hits = snapshot
+            .exact_vector_search_nodes(
+                &DbString::from_string(label.to_string()).unwrap(),
+                &DbString::from_string(property.to_string()).unwrap(),
+                &vector_value,
+                VectorMetric::Cosine,
+                limit,
+            )
             .map_err(|e| anyhow::anyhow!("Vector search failed: {}", e))?;
 
-        Ok(hits)
+        let results: Vec<(NodeId, f64)> = hits
+            .iter()
+            .map(|hit| (hit.node_id, hit.distance))
+            .collect();
+
+        Ok(results)
     }
 
     // ─── Maintenance ───────────────────────────────────────────────────

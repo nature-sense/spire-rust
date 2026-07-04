@@ -1,3 +1,19 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 NatureSense
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //! MemoryGraphActor — backed by SeleneDB's `GraphDb`.
 //!
 //! This actor is the sole data store for the system, owning graph nodes, edges,
@@ -22,15 +38,16 @@ use crate::graph::GraphDb;
 use crate::models::embedding::Embedder;
 use crate::models::graph::GraphResult;
 use crate::models::memory_graph::{
-    ContextSearchResult, GraphEdge, GraphNode, MemoryEntry, MemoryMetadata, NodeFilter, NodeInput,
-    NodeType, NodeUpdate, ProjectSnapshot, ProjectStats, RelationshipInput, RelationshipType,
-    RetrievalSource, SchemaError, ScoredNode, SearchOptions, TraversalDirection, TraversalOptions,
-    TraversalResult,
+    AgentContext, ContextSearchResult, GraphEdge, GraphNode, MemoryEntry, MemoryMetadata,
+    NodeFilter, NodeInput, NodeType, NodeUpdate, ProjectSnapshot, ProjectStats, RelationshipInput,
+    RelationshipType, RetrievalSource, SchemaError, ScoredNode, SearchOptions, TraversalDirection,
+    TraversalOptions, TraversalResult,
 };
 
+
+use selene_core::db_string::DbString;
 use selene_core::identity::{EdgeId, NodeId};
 use selene_core::value::Value;
-use selene_core::vector::VectorMetric;
 
 // ============================================================================
 // MemoryGraphMessage Enum — 14 variants matching IMemoryGraph API
@@ -40,6 +57,7 @@ use selene_core::vector::VectorMetric;
 ///
 /// This actor is the sole data store for the system, owning graph nodes, edges,
 /// and vector embeddings directly (no separate GraphActor or VectorActor).
+#[allow(dead_code)]
 pub enum MemoryGraphMessage {
     // ── Node Operations ─────────────────────────────────
     GetNode {
@@ -109,7 +127,210 @@ pub enum MemoryGraphMessage {
     Sync {
         reply_to: tokio::sync::oneshot::Sender<Result<()>>,
     },
+
+    // ================================================================
+    // Agent Infrastructure Messages
+    // ================================================================
+
+    // ── Agent Management ─────────────────────────────────
+    CreateAgent {
+        input: NodeInput,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetAgent {
+        id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetAgentByName {
+        name: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetActiveAgents {
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+    GetAgentContext {
+        agent_id: String,
+        goal: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<AgentContext>>,
+    },
+
+    // ── Tool Management ──────────────────────────────────
+    CreateTool {
+        input: NodeInput,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetTool {
+        id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetToolsForAgent {
+        agent_id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+    GetToolByName {
+        name: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+
+    // ── Plan Management ──────────────────────────────────
+    CreatePlan {
+        input: NodeInput,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetPlan {
+        id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetPlanSteps {
+        plan_id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+    GetNextStep {
+        plan_id: String,
+        current_order: u32,
+        reply_to: tokio::sync::oneshot::Sender<Result<Option<GraphNode>>>,
+    },
+
+    // ── Execution Management ─────────────────────────────
+    StartExecution {
+        input: NodeInput,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    UpdateExecutionStatus {
+        id: String,
+        status: String,
+        result: Option<String>,
+        reply_to: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+    GetExecution {
+        id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetExecutionHistory {
+        agent_id: String,
+        limit: usize,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+    GetSuccessfulExecutions {
+        agent_id: String,
+        limit: usize,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+    GetFailedExecutions {
+        agent_id: String,
+        limit: usize,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+
+    // ── Task Result Management ───────────────────────────
+    RecordTaskResult {
+        input: NodeInput,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetTaskResults {
+        execution_id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+
+    // ── Artifact Management ──────────────────────────────
+    RecordArtifact {
+        input: NodeInput,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetArtifacts {
+        execution_id: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+    GetLatestArtifact {
+        agent_id: String,
+        artifact_type: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<Option<GraphNode>>>,
+    },
+
+    // ── Error Pattern Management ─────────────────────────
+    RecordError {
+        input: NodeInput,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphNode>>,
+    },
+    GetErrorByFingerprint {
+        fingerprint: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<Option<GraphNode>>>,
+    },
+    GetSimilarErrors {
+        embedding_id: String,
+        limit: usize,
+        reply_to: tokio::sync::oneshot::Sender<Result<Vec<GraphNode>>>,
+    },
+    LinkErrorToFix {
+        error_id: String,
+        execution_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+
+    // ── Agent Relationship Management ────────────────────
+    CreateUsesTool {
+        agent_id: String,
+        tool_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreateFollowsPlan {
+        agent_id: String,
+        plan_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreateContainsStep {
+        plan_id: String,
+        step_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreatePrecedes {
+        from_step_id: String,
+        to_step_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreateProduced {
+        execution_id: String,
+        artifact_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreateEncounteredError {
+        execution_id: String,
+        error_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreateResolvedBy {
+        error_id: String,
+        execution_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreatePartOfExecution {
+        task_result_id: String,
+        execution_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreateExecutedBy {
+        execution_id: String,
+        agent_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
+    CreateLearnedFrom {
+        agent_id: String,
+        execution_id: String,
+        properties: HashMap<String, serde_json::Value>,
+        reply_to: tokio::sync::oneshot::Sender<Result<GraphEdge>>,
+    },
 }
+
 
 // ============================================================================
 // MemoryGraphActor
@@ -124,6 +345,7 @@ pub enum MemoryGraphMessage {
 /// - Unique `(type, name)` per node
 /// - Referential integrity for relationships (from_id / to_id must exist)
 /// - Acyclic `depends_on` relationships
+#[allow(dead_code)]
 pub struct MemoryGraphActor {
     /// The SeleneDB-backed graph database.
     graph_db: Arc<GraphDb>,
@@ -277,8 +499,125 @@ impl MemoryGraphActor {
         false
     }
 
+    /// Check whether adding a `precedes` edge from `from_id` to `to_id`
+    /// would create a cycle. Uses DFS from `to_id` following outgoing precedes edges.
+    fn would_create_precedes_cycle(&self, from_id: &str, to_id: &str) -> bool {
+        if from_id == to_id {
+            return true;
+        }
+        let mut stack = vec![to_id.to_string()];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(current) = stack.pop() {
+            if current == from_id {
+                return true;
+            }
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            for edge in self.edge_meta.values() {
+                if edge.edge_type == RelationshipType::Precedes && edge.from_id == current {
+                    stack.push(edge.to_id.clone());
+                }
+            }
+        }
+        false
+    }
+
+    /// Store a node (with duplicate check) and return the created GraphNode.
+    fn handle_store_node(&mut self, input: NodeInput) -> Result<GraphNode> {
+        // Enforce unique (type, name) constraint
+        if self.has_duplicate(&input.node_type, &input.name) {
+            return Err(anyhow::anyhow!(SchemaError::DuplicateNode {
+                type_name: format!("{:?}", input.node_type),
+                name: input.name.clone(),
+            }));
+        }
+
+        let mut graph_node = Self::create_node_from_input(input);
+
+        // Store in SeleneDB first to get the allocated ID.
+        let selene_id = self.store_in_selene(&graph_node)?;
+
+        // Record the UUID ↔ SeleneDB ID mapping.
+        let uuid = graph_node.id.clone();
+        self.uuid_to_node.insert(uuid.clone(), selene_id);
+        self.node_to_uuid.insert(selene_id, uuid.clone());
+
+        // Embedding generation is deferred — just mark the node for later embedding
+        if graph_node.description.is_some() {
+            graph_node.embedding_id = Some(Uuid::new_v4().to_string());
+        }
+
+
+        self.node_meta.insert(uuid.clone(), graph_node.clone());
+        Ok(graph_node)
+    }
+
+    /// Create a relationship (with referential integrity and acyclic checks) and return the created GraphEdge.
+    fn handle_create_relationship(&mut self, rel: RelationshipInput) -> Result<GraphEdge> {
+        // Enforce referential integrity: both nodes must exist
+        if !self.node_meta.contains_key(&rel.from_id) {
+            return Err(anyhow::anyhow!(SchemaError::NodeNotFound {
+                id: rel.from_id.clone(),
+            }));
+        }
+        if !self.node_meta.contains_key(&rel.to_id) {
+            return Err(anyhow::anyhow!(SchemaError::NodeNotFound {
+                id: rel.to_id.clone(),
+            }));
+        }
+
+        // Enforce acyclic constraint for depends_on relationships
+        if rel.edge_type == RelationshipType::DependsOn {
+            if self.would_create_cycle(&rel.from_id, &rel.to_id) {
+                return Err(anyhow::anyhow!(
+                    SchemaError::AcyclicDependencyViolation {
+                        from: rel.from_id.clone(),
+                        to: rel.to_id.clone(),
+                    }
+                ));
+            }
+        }
+
+        // Convert properties to SeleneDB values.
+        let mut selene_props: Vec<(String, Value)> = Vec::new();
+        for (key, json_val) in rel.properties.as_ref().unwrap_or(&HashMap::new()) {
+            if let Some(val) = json_value_to_selene(json_val) {
+                selene_props.push((key.clone(), val));
+            }
+        }
+
+        // Store in SeleneDB.
+        let predicate = format!("{:?}", rel.edge_type);
+        let selene_edge_id = self.store_edge_in_selene(
+            &rel.from_id,
+            &predicate,
+            &rel.to_id,
+            &selene_props,
+        )?;
+
+        let edge = GraphEdge {
+            id: Uuid::new_v4().to_string(),
+            edge_type: rel.edge_type,
+            from_id: rel.from_id,
+            to_id: rel.to_id,
+            properties: rel.properties.unwrap_or_default(),
+            created_at: Utc::now(),
+            weight: rel.weight,
+        };
+        let uuid = edge.id.clone();
+
+        // Record the UUID ↔ SeleneDB ID mapping.
+        self.uuid_to_edge.insert(uuid.clone(), selene_edge_id);
+        self.edge_to_uuid.insert(selene_edge_id, uuid.clone());
+
+        self.edge_meta.insert(uuid, edge.clone());
+        Ok(edge)
+    }
+
     /// BFS traversal from a start node, respecting relationship_types and direction filters.
     fn traverse(
+
         &self,
         start_node_id: &str,
         max_depth: usize,
@@ -359,8 +698,6 @@ impl MemoryGraphActor {
 
     /// Store a node in SeleneDB and return the allocated `NodeId`.
     fn store_in_selene(&mut self, graph_node: &GraphNode) -> Result<NodeId> {
-        let mut txn = self.graph_db.begin_write();
-
         // Build labels from node_type and optional subtype.
         let mut labels = vec![format!("{:?}", graph_node.node_type)];
         if let Some(ref subtype) = graph_node.subtype {
@@ -369,16 +706,16 @@ impl MemoryGraphActor {
 
         // Build properties.
         let mut properties: Vec<(String, Value)> = Vec::new();
-        properties.push(("name".to_string(), Value::String(graph_node.name.clone().into())));
+        properties.push(("name".to_string(), Value::String(DbString::from_string(graph_node.name.clone()).unwrap())));
         if let Some(ref desc) = graph_node.description {
-            properties.push(("description".to_string(), Value::String(desc.clone().into())));
+            properties.push(("description".to_string(), Value::String(DbString::from_string(desc.clone()).unwrap())));
         }
         if let Some(ref emb_id) = graph_node.embedding_id {
-            properties.push(("embedding_id".to_string(), Value::String(emb_id.clone().into())));
+            properties.push(("embedding_id".to_string(), Value::String(DbString::from_string(emb_id.clone()).unwrap())));
         }
         // Store timestamps as ISO strings.
-        properties.push(("created_at".to_string(), Value::String(graph_node.created_at.to_rfc3339().into())));
-        properties.push(("updated_at".to_string(), Value::String(graph_node.updated_at.to_rfc3339().into())));
+        properties.push(("created_at".to_string(), Value::String(DbString::from_string(graph_node.created_at.to_rfc3339()).unwrap())));
+        properties.push(("updated_at".to_string(), Value::String(DbString::from_string(graph_node.updated_at.to_rfc3339()).unwrap())));
         properties.push(("version".to_string(), Value::Int(graph_node.version as i64)));
 
         // Convert JSON properties to SeleneDB values.
@@ -388,16 +725,7 @@ impl MemoryGraphActor {
             }
         }
 
-        // Use the crate::graph::Node type for insertion.
-        let node = crate::models::graph::Node {
-            id: NodeId::TOMBSTONE,
-            labels,
-            properties,
-        };
-
-        let selene_id = txn.insert_node(node)?;
-        txn.commit()?;
-
+        let selene_id = self.graph_db.create_node(labels, properties)?;
         Ok(selene_id)
     }
 
@@ -416,7 +744,7 @@ impl MemoryGraphActor {
             .copied()
             .ok_or_else(|| anyhow::anyhow!("Target node not found: {}", to_uuid))?;
 
-        let edge_id = self.graph_db.insert_edge(from_id, predicate, to_id, properties.to_vec())?;
+        let edge_id = self.graph_db.create_edge(from_id, predicate, to_id, properties.to_vec())?;
         Ok(edge_id)
     }
 }
@@ -475,28 +803,11 @@ impl Actor for MemoryGraphActor {
                 self.uuid_to_node.insert(uuid.clone(), selene_id);
                 self.node_to_uuid.insert(selene_id, uuid.clone());
 
-                // Embedding generation is async — spawn a task for it
-                let embedder = self.embedder.clone();
-                let node_id = uuid.clone();
-
-                if let Some(desc_text) = graph_node.description.clone() {
-                    let embedder = embedder.clone();
-                    let node_id = node_id.clone();
-                    tokio::spawn(async move {
-                        match embedder.embed(&desc_text).await {
-                            Ok(emb) => {
-                                info!(
-                                    "MemoryGraph: generated {}d embedding for node {}",
-                                    emb.dimensions, node_id
-                                );
-                            }
-                            Err(e) => {
-                                info!("MemoryGraph: embedding failed for node {}: {}", node_id, e);
-                            }
-                        }
-                    });
+                // Embedding generation is deferred — just mark the node for later embedding
+                if graph_node.description.is_some() {
                     graph_node.embedding_id = Some(Uuid::new_v4().to_string());
                 }
+
 
                 self.node_meta.insert(uuid.clone(), graph_node.clone());
                 let _ = reply_to.send(Ok(graph_node));
@@ -530,28 +841,14 @@ impl Actor for MemoryGraphActor {
 
                         // If description changed, regenerate embedding
                         if updated.description != existing.description {
-                            if let Some(desc_text) = updated.description.clone() {
-                                let embedder = self.embedder.clone();
-                                let node_id = id.clone();
-                                tokio::spawn(async move {
-                                    match embedder.embed(&desc_text).await {
-                                        Ok(emb) => {
-                                            info!(
-                                                "MemoryGraph: re-embedded node {} ({}d)",
-                                                node_id, emb.dimensions
-                                            );
-                                        }
-                                        Err(e) => {
-                                            info!("MemoryGraph: re-embedding failed for node {}: {}", node_id, e);
-                                        }
-                                    }
-                                });
+                            if updated.description.is_some() {
                                 updated.embedding_id = Some(Uuid::new_v4().to_string());
                             } else {
                                 // Description was cleared — remove embedding reference
                                 updated.embedding_id = None;
                             }
                         }
+
 
                         self.node_meta.insert(id.clone(), updated.clone());
                         let _ = reply_to.send(Ok(updated));
@@ -762,29 +1059,9 @@ impl Actor for MemoryGraphActor {
                 // Try vector search first via SeleneDB.
                 let mut scored: Vec<ScoredNode> = Vec::new();
 
-                // Attempt semantic search using SeleneDB's vector index.
-                if let Ok(embedding) = self.embedder.embed(&query).await {
-                    let query_vec: Vec<f32> = embedding.vector.iter().map(|&v| v as f32).collect();
-                    match self.graph_db.vector_search(&query_vec, VectorMetric::Cosine, top_k) {
-                        Ok(results) => {
-                            for (selene_id, similarity) in results {
-                                if let Some(uuid) = self.node_to_uuid.get(&selene_id) {
-                                    if let Some(node) = self.node_meta.get(uuid) {
-                                        scored.push(ScoredNode {
-                                            node: node.clone(),
-                                            similarity,
-                                            source: RetrievalSource::Semantic,
-                                            score: similarity,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            info!("MemoryGraph: vector search failed, falling back to text: {}", e);
-                        }
-                    }
-                }
+                // Vector search is not available in synchronous actor context.
+                // Falls back to text-based search below.
+
 
                 // Fallback: text-based search if vector search returned nothing.
                 if scored.is_empty() {
@@ -844,22 +1121,9 @@ impl Actor for MemoryGraphActor {
                     updated_at: now,
                 };
 
-                // Spawn async embedding
-                let embedder = self.embedder.clone();
-                let mem_id = memory_id.clone();
-                let text_clone = text.clone();
-                tokio::spawn(async move {
-                    match embedder.embed(&text_clone).await {
-                        Ok(emb) => {
-                            info!("MemoryGraph: generated {}d embedding for memory {}", emb.dimensions, mem_id);
-                        }
-                        Err(e) => {
-                            info!("MemoryGraph: embedding failed for memory {}: {}", mem_id, e);
-                        }
-                    }
-                });
-
+                // Embedding generation is deferred
                 let _ = reply_to.send(Ok(entry));
+
             }
 
             // ── Recall ──────────────────────────────────
@@ -902,9 +1166,589 @@ impl Actor for MemoryGraphActor {
                 info!("MemoryGraph: sync");
                 let _ = reply_to.send(Ok(()));
             }
+
+            // ================================================================
+            // Agent Infrastructure Handlers
+            // ================================================================
+
+            // ── CreateAgent ─────────────────────────────
+            MemoryGraphMessage::CreateAgent { input, reply_to } => {
+                info!("MemoryGraph: create_agent({})", input.name);
+                // Agents use the same StoreNode logic with Agent node_type
+                let mut input = input;
+                input.node_type = NodeType::Agent;
+                let result = self.handle_store_node(input);
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetAgent ────────────────────────────────
+            MemoryGraphMessage::GetAgent { id, reply_to } => {
+                info!("MemoryGraph: get_agent({})", id);
+                let result = self.node_meta.get(&id)
+                    .filter(|n| n.node_type == NodeType::Agent)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(SchemaError::NodeNotFound { id: id.clone() }));
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetAgentByName ──────────────────────────
+            MemoryGraphMessage::GetAgentByName { name, reply_to } => {
+                info!("MemoryGraph: get_agent_by_name({})", name);
+                let result = self.node_meta.values()
+                    .find(|n| n.node_type == NodeType::Agent && n.name == name)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(SchemaError::NodeNotFound { id: name.clone() }));
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetActiveAgents ─────────────────────────
+            MemoryGraphMessage::GetActiveAgents { reply_to } => {
+                info!("MemoryGraph: get_active_agents");
+                let agents: Vec<GraphNode> = self.node_meta.values()
+                    .filter(|n| {
+                        n.node_type == NodeType::Agent
+                            && n.properties.get("is_active")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect();
+                let _ = reply_to.send(Ok(agents));
+            }
+
+            // ── GetAgentContext ─────────────────────────
+            MemoryGraphMessage::GetAgentContext { agent_id, goal, reply_to } => {
+                info!("MemoryGraph: get_agent_context({})", agent_id);
+                let agent = match self.node_meta.get(&agent_id) {
+                    Some(a) if a.node_type == NodeType::Agent => a.clone(),
+                    _ => {
+                        let _ = reply_to.send(Err(anyhow::anyhow!(SchemaError::NodeNotFound { id: agent_id.clone() })));
+                        return Ok(());
+                    }
+                };
+
+                // Get tools via USES_TOOL relationships
+                let tools: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::UsesTool && e.from_id == agent_id)
+                    .filter_map(|e| self.node_meta.get(&e.to_id).cloned())
+                    .collect();
+
+                // Get active plan via FOLLOWS_PLAN relationships
+                let plan = self.edge_meta.values()
+                    .find(|e| e.edge_type == RelationshipType::FollowsPlan && e.from_id == agent_id)
+                    .and_then(|e| self.node_meta.get(&e.to_id).cloned());
+
+                // Get plan steps
+                let steps: Vec<GraphNode> = if let Some(ref p) = plan {
+                    self.edge_meta.values()
+                        .filter(|e| e.edge_type == RelationshipType::ContainsStep && e.from_id == p.id)
+                        .filter_map(|e| self.node_meta.get(&e.to_id).cloned())
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                // Recent successful executions
+                let recent_successes: Vec<GraphNode> = self.node_meta.values()
+                    .filter(|n| {
+                        n.node_type == NodeType::Execution
+                            && n.properties.get("status")
+                                .and_then(|v| v.as_str())
+                                == Some("success")
+                    })
+                    .take(5)
+                    .cloned()
+                    .collect();
+
+                // Artifacts from recent executions
+                let artifacts: Vec<GraphNode> = recent_successes.iter()
+                    .flat_map(|exec| {
+                        self.edge_meta.values()
+                            .filter(|e| e.edge_type == RelationshipType::Produced && e.from_id == exec.id)
+                            .filter_map(|e| self.node_meta.get(&e.to_id).cloned())
+                    })
+                    .collect();
+
+                let context = AgentContext {
+                    agent,
+                    tools,
+                    plan,
+                    steps,
+                    recent_successes,
+                    similar_successes: vec![],
+                    similar_errors: vec![],
+                    artifacts,
+                    current_goal: goal,
+                    metadata: HashMap::new(),
+                };
+                let _ = reply_to.send(Ok(context));
+            }
+
+            // ── CreateTool ──────────────────────────────
+            MemoryGraphMessage::CreateTool { input, reply_to } => {
+                info!("MemoryGraph: create_tool({})", input.name);
+                let mut input = input;
+                input.node_type = NodeType::Tool;
+                let result = self.handle_store_node(input);
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetTool ─────────────────────────────────
+            MemoryGraphMessage::GetTool { id, reply_to } => {
+                info!("MemoryGraph: get_tool({})", id);
+                let result = self.node_meta.get(&id)
+                    .filter(|n| n.node_type == NodeType::Tool)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(SchemaError::NodeNotFound { id: id.clone() }));
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetToolsForAgent ────────────────────────
+            MemoryGraphMessage::GetToolsForAgent { agent_id, reply_to } => {
+                info!("MemoryGraph: get_tools_for_agent({})", agent_id);
+                let tools: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::UsesTool && e.from_id == agent_id)
+                    .filter_map(|e| self.node_meta.get(&e.to_id).cloned())
+                    .collect();
+                let _ = reply_to.send(Ok(tools));
+            }
+
+            // ── GetToolByName ───────────────────────────
+            MemoryGraphMessage::GetToolByName { name, reply_to } => {
+                info!("MemoryGraph: get_tool_by_name({})", name);
+                let result = self.node_meta.values()
+                    .find(|n| n.node_type == NodeType::Tool && n.name == name)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(SchemaError::NodeNotFound { id: name.clone() }));
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreatePlan ──────────────────────────────
+            MemoryGraphMessage::CreatePlan { input, reply_to } => {
+                info!("MemoryGraph: create_plan({})", input.name);
+                let mut input = input;
+                input.node_type = NodeType::Plan;
+                let result = self.handle_store_node(input);
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetPlan ─────────────────────────────────
+            MemoryGraphMessage::GetPlan { id, reply_to } => {
+                info!("MemoryGraph: get_plan({})", id);
+                let result = self.node_meta.get(&id)
+                    .filter(|n| n.node_type == NodeType::Plan)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(SchemaError::NodeNotFound { id: id.clone() }));
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetPlanSteps ────────────────────────────
+            MemoryGraphMessage::GetPlanSteps { plan_id, reply_to } => {
+                info!("MemoryGraph: get_plan_steps({})", plan_id);
+                let steps: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::ContainsStep && e.from_id == plan_id)
+                    .filter_map(|e| self.node_meta.get(&e.to_id).cloned())
+                    .collect();
+                let _ = reply_to.send(Ok(steps));
+            }
+
+            // ── GetNextStep ─────────────────────────────
+            MemoryGraphMessage::GetNextStep { plan_id, current_order, reply_to } => {
+                info!("MemoryGraph: get_next_step({}, order={})", plan_id, current_order);
+                let next_order = current_order + 1;
+                let next_step: Option<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::ContainsStep && e.from_id == plan_id)
+                    .filter_map(|e| self.node_meta.get(&e.to_id))
+                    .find(|step| {
+                        step.properties.get("step_order")
+                            .and_then(|v| v.as_u64())
+                            .map(|o| o as u32 == next_order)
+                            .unwrap_or(false)
+                    })
+                    .cloned();
+                let _ = reply_to.send(Ok(next_step));
+            }
+
+            // ── StartExecution ──────────────────────────
+            MemoryGraphMessage::StartExecution { input, reply_to } => {
+                info!("MemoryGraph: start_execution({})", input.name);
+                let mut input = input;
+                input.node_type = NodeType::Execution;
+                // Set initial status to "running"
+                let mut props = input.properties.unwrap_or_default();
+                props.insert("status".to_string(), serde_json::Value::String("running".to_string()));
+                props.insert("start_time".to_string(), serde_json::Value::String(Utc::now().to_rfc3339()));
+                input.properties = Some(props);
+                let result = self.handle_store_node(input);
+                let _ = reply_to.send(result);
+            }
+
+            // ── UpdateExecutionStatus ───────────────────
+            MemoryGraphMessage::UpdateExecutionStatus { id, status, result, reply_to } => {
+                info!("MemoryGraph: update_execution_status({}, {})", id, status);
+                match self.node_meta.get_mut(&id) {
+                    Some(node) if node.node_type == NodeType::Execution => {
+                        node.properties.insert("status".to_string(), serde_json::Value::String(status.clone()));
+                        if status == "success" || status == "failed" {
+
+                            node.properties.insert("end_time".to_string(), serde_json::Value::String(Utc::now().to_rfc3339()));
+                        }
+                        if let Some(msg) = result {
+                            node.properties.insert("status_message".to_string(), serde_json::Value::String(msg));
+                        }
+                        node.updated_at = Utc::now();
+                        node.version += 1;
+                        let _ = reply_to.send(Ok(()));
+                    }
+                    _ => {
+                        let _ = reply_to.send(Err(anyhow::anyhow!(SchemaError::NodeNotFound { id: id.clone() })));
+                    }
+                }
+            }
+
+            // ── GetExecution ────────────────────────────
+            MemoryGraphMessage::GetExecution { id, reply_to } => {
+                info!("MemoryGraph: get_execution({})", id);
+                let result = self.node_meta.get(&id)
+                    .filter(|n| n.node_type == NodeType::Execution)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!(SchemaError::NodeNotFound { id: id.clone() }));
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetExecutionHistory ─────────────────────
+            MemoryGraphMessage::GetExecutionHistory { agent_id, limit, reply_to } => {
+                info!("MemoryGraph: get_execution_history({})", agent_id);
+                let executions: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::ExecutedBy && e.to_id == agent_id)
+                    .filter_map(|e| self.node_meta.get(&e.from_id))
+                    .take(limit)
+                    .cloned()
+                    .collect();
+                let _ = reply_to.send(Ok(executions));
+            }
+
+            // ── GetSuccessfulExecutions ─────────────────
+            MemoryGraphMessage::GetSuccessfulExecutions { agent_id, limit, reply_to } => {
+                info!("MemoryGraph: get_successful_executions({})", agent_id);
+                let executions: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::ExecutedBy && e.to_id == agent_id)
+                    .filter_map(|e| self.node_meta.get(&e.from_id))
+                    .filter(|n| {
+                        n.properties.get("status")
+                            .and_then(|v| v.as_str())
+                            == Some("success")
+                    })
+                    .take(limit)
+                    .cloned()
+                    .collect();
+                let _ = reply_to.send(Ok(executions));
+            }
+
+            // ── GetFailedExecutions ─────────────────────
+            MemoryGraphMessage::GetFailedExecutions { agent_id, limit, reply_to } => {
+                info!("MemoryGraph: get_failed_executions({})", agent_id);
+                let executions: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::ExecutedBy && e.to_id == agent_id)
+                    .filter_map(|e| self.node_meta.get(&e.from_id))
+                    .filter(|n| {
+                        n.properties.get("status")
+                            .and_then(|v| v.as_str())
+                            == Some("failed")
+                    })
+                    .take(limit)
+                    .cloned()
+                    .collect();
+                let _ = reply_to.send(Ok(executions));
+            }
+
+            // ── RecordTaskResult ────────────────────────
+            MemoryGraphMessage::RecordTaskResult { input, reply_to } => {
+                info!("MemoryGraph: record_task_result({})", input.name);
+                let mut input = input;
+                input.node_type = NodeType::TaskResult;
+                let result = self.handle_store_node(input);
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetTaskResults ──────────────────────────
+            MemoryGraphMessage::GetTaskResults { execution_id, reply_to } => {
+                info!("MemoryGraph: get_task_results({})", execution_id);
+                let results: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::PartOfExecution && e.to_id == execution_id)
+                    .filter_map(|e| self.node_meta.get(&e.from_id))
+                    .cloned()
+                    .collect();
+                let _ = reply_to.send(Ok(results));
+            }
+
+            // ── RecordArtifact ──────────────────────────
+            MemoryGraphMessage::RecordArtifact { input, reply_to } => {
+                info!("MemoryGraph: record_artifact({})", input.name);
+                let mut input = input;
+                input.node_type = NodeType::Artifact;
+                let result = self.handle_store_node(input);
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetArtifacts ────────────────────────────
+            MemoryGraphMessage::GetArtifacts { execution_id, reply_to } => {
+                info!("MemoryGraph: get_artifacts({})", execution_id);
+                let artifacts: Vec<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::Produced && e.from_id == execution_id)
+                    .filter_map(|e| self.node_meta.get(&e.to_id).cloned())
+                    .collect();
+                let _ = reply_to.send(Ok(artifacts));
+            }
+
+            // ── GetLatestArtifact ───────────────────────
+            MemoryGraphMessage::GetLatestArtifact { agent_id, artifact_type, reply_to } => {
+                info!("MemoryGraph: get_latest_artifact({}, {})", agent_id, artifact_type);
+                // Find the most recent execution for this agent, then get its artifacts
+                let latest_artifact: Option<GraphNode> = self.edge_meta.values()
+                    .filter(|e| e.edge_type == RelationshipType::ExecutedBy && e.to_id == agent_id)
+                    .filter_map(|e| self.node_meta.get(&e.from_id))
+                    .max_by_key(|exec| exec.created_at)
+                    .and_then(|exec| {
+                        self.edge_meta.values()
+                            .filter(|e| e.edge_type == RelationshipType::Produced && e.from_id == exec.id)
+                            .filter_map(|e| self.node_meta.get(&e.to_id))
+                            .find(|art| {
+                                art.subtype.as_deref() == Some(&artifact_type)
+                            })
+                            .cloned()
+                    });
+                let _ = reply_to.send(Ok(latest_artifact));
+            }
+
+            // ── RecordError ─────────────────────────────
+            MemoryGraphMessage::RecordError { input, reply_to } => {
+                info!("MemoryGraph: record_error({})", input.name);
+                let mut input = input;
+                input.node_type = NodeType::ErrorPattern;
+                let result = self.handle_store_node(input);
+                let _ = reply_to.send(result);
+            }
+
+            // ── GetErrorByFingerprint ───────────────────
+            MemoryGraphMessage::GetErrorByFingerprint { fingerprint, reply_to } => {
+                info!("MemoryGraph: get_error_by_fingerprint({})", fingerprint);
+                let error = self.node_meta.values()
+                    .find(|n| {
+                        n.node_type == NodeType::ErrorPattern
+                            && n.properties.get("fingerprint")
+                                .and_then(|v| v.as_str())
+                                == Some(&fingerprint)
+                    })
+                    .cloned();
+                let _ = reply_to.send(Ok(error));
+            }
+
+            // ── GetSimilarErrors ────────────────────────
+            MemoryGraphMessage::GetSimilarErrors { embedding_id, limit, reply_to } => {
+                info!("MemoryGraph: get_similar_errors({})", embedding_id);
+                // Text-based fallback: find errors with matching tags or type
+                let source_node = self.node_meta.values()
+                    .find(|n| n.embedding_id.as_deref() == Some(&embedding_id));
+                let similar: Vec<GraphNode> = match source_node {
+                    Some(src) => {
+                        let src_tags: Vec<String> = src.properties.get("tags")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                            })
+                            .unwrap_or_default();
+                        self.node_meta.values()
+                            .filter(|n| {
+                                n.node_type == NodeType::ErrorPattern && n.id != src.id
+                            })
+                            .filter(|n| {
+                                // Match if any tag overlaps
+                                let tags: Vec<String> = n.properties.get("tags")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                                    })
+                                    .unwrap_or_default();
+                                tags.iter().any(|t| src_tags.contains(t))
+                            })
+                            .take(limit)
+                            .cloned()
+                            .collect()
+                    }
+                    None => vec![],
+                };
+                let _ = reply_to.send(Ok(similar));
+            }
+
+            // ── LinkErrorToFix ──────────────────────────
+            MemoryGraphMessage::LinkErrorToFix { error_id, execution_id, properties, reply_to } => {
+                info!("MemoryGraph: link_error_to_fix({} -> {})", error_id, execution_id);
+                // Create a RESOLVED_BY relationship from error to execution
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::ResolvedBy,
+                    from_id: error_id,
+                    to_id: execution_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result.map(|_| ()));
+            }
+
+            // ── CreateUsesTool ──────────────────────────
+            MemoryGraphMessage::CreateUsesTool { agent_id, tool_id, properties, reply_to } => {
+                info!("MemoryGraph: create_uses_tool({} -> {})", agent_id, tool_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::UsesTool,
+                    from_id: agent_id,
+                    to_id: tool_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreateFollowsPlan ───────────────────────
+            MemoryGraphMessage::CreateFollowsPlan { agent_id, plan_id, properties, reply_to } => {
+                info!("MemoryGraph: create_follows_plan({} -> {})", agent_id, plan_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::FollowsPlan,
+                    from_id: agent_id,
+                    to_id: plan_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreateContainsStep ──────────────────────
+            MemoryGraphMessage::CreateContainsStep { plan_id, step_id, properties, reply_to } => {
+                info!("MemoryGraph: create_contains_step({} -> {})", plan_id, step_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::ContainsStep,
+                    from_id: plan_id,
+                    to_id: step_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreatePrecedes ──────────────────────────
+            MemoryGraphMessage::CreatePrecedes { from_step_id, to_step_id, properties, reply_to } => {
+                info!("MemoryGraph: create_precedes({} -> {})", from_step_id, to_step_id);
+                // Enforce acyclic constraint for precedes relationships
+                if self.would_create_precedes_cycle(&from_step_id, &to_step_id) {
+                    let _ = reply_to.send(Err(anyhow::anyhow!(
+                        SchemaError::AcyclicPrecedesViolation {
+                            from: from_step_id.clone(),
+                            to: to_step_id.clone(),
+                        }
+                    )));
+                    return Ok(());
+                }
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::Precedes,
+                    from_id: from_step_id,
+                    to_id: to_step_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreateProduced ──────────────────────────
+            MemoryGraphMessage::CreateProduced { execution_id, artifact_id, properties, reply_to } => {
+                info!("MemoryGraph: create_produced({} -> {})", execution_id, artifact_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::Produced,
+                    from_id: execution_id,
+                    to_id: artifact_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreateEncounteredError ──────────────────
+            MemoryGraphMessage::CreateEncounteredError { execution_id, error_id, properties, reply_to } => {
+                info!("MemoryGraph: create_encountered_error({} -> {})", execution_id, error_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::EncounteredError,
+                    from_id: execution_id,
+                    to_id: error_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreateResolvedBy ────────────────────────
+            MemoryGraphMessage::CreateResolvedBy { error_id, execution_id, properties, reply_to } => {
+                info!("MemoryGraph: create_resolved_by({} -> {})", error_id, execution_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::ResolvedBy,
+                    from_id: error_id,
+                    to_id: execution_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreatePartOfExecution ───────────────────
+            MemoryGraphMessage::CreatePartOfExecution { task_result_id, execution_id, properties, reply_to } => {
+                info!("MemoryGraph: create_part_of_execution({} -> {})", task_result_id, execution_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::PartOfExecution,
+                    from_id: task_result_id,
+                    to_id: execution_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreateExecutedBy ────────────────────────
+            MemoryGraphMessage::CreateExecutedBy { execution_id, agent_id, properties, reply_to } => {
+                info!("MemoryGraph: create_executed_by({} -> {})", execution_id, agent_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::ExecutedBy,
+                    from_id: execution_id,
+                    to_id: agent_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
+
+            // ── CreateLearnedFrom ───────────────────────
+            MemoryGraphMessage::CreateLearnedFrom { agent_id, execution_id, properties, reply_to } => {
+                info!("MemoryGraph: create_learned_from({} -> {})", agent_id, execution_id);
+                let rel = RelationshipInput {
+                    edge_type: RelationshipType::LearnedFrom,
+                    from_id: agent_id,
+                    to_id: execution_id,
+                    properties: Some(properties),
+                    weight: None,
+                };
+                let result = self.handle_create_relationship(rel);
+                let _ = reply_to.send(result);
+            }
         }
         Ok(())
     }
+
 }
 
 // ============================================================================
@@ -925,7 +1769,7 @@ fn json_value_to_selene(json: &serde_json::Value) -> Option<Value> {
                 None
             }
         }
-        serde_json::Value::String(s) => Some(Value::String(s.clone().into())),
+        serde_json::Value::String(s) => Some(Value::String(DbString::from_string(s.clone()).unwrap())),
         serde_json::Value::Array(arr) => {
             let items: Vec<Value> = arr.iter().filter_map(json_value_to_selene).collect();
             Some(Value::List(items))
@@ -940,7 +1784,7 @@ fn json_value_to_selene(json: &serde_json::Value) -> Option<Value> {
                 items
                     .into_iter()
                     .map(|(k, v)| {
-                        Value::List(vec![Value::String(k.into()), v])
+                        Value::List(vec![Value::String(DbString::from_string(k).unwrap()), v])
                     })
                     .collect(),
             ))

@@ -198,3 +198,9 @@ strip = true
 - Integration tests live in `tests/`
 - Tests that require model downloads are marked `#[ignore]` and run with `cargo test -- --ignored`
 - The `TestEmbedder` in `tests/integration_test.rs` provides a no-op embedder for testing
+
+---
+
+## License
+
+GNU GPLv3 — see [LICENSE](../LICENSE) for details.

@@ -2,7 +2,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-blue)](https://www.rust-lang.org)
 [![VS Code](https://img.shields.io/badge/vscode-1.90%2B-blueviolet)](https://code.visualstudio.com)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
 **Spire Rust** is a VS Code extension powered by a native Rust MCP (Model Context Protocol) server. It provides intelligent code analysis, knowledge graph traversal, and semantic search capabilities directly in the editor — all running locally with no cloud dependency.
 
@@ -191,12 +191,30 @@ The `.vscode/launch.json` and `.vscode/tasks.json` files provide pre-configured 
 
 ---
 
+## Project Status
+
+Spire Rust is in **early development** (v0.1.0). The architecture is in place, but several features are stubs awaiting implementation:
+
+- [ ] **LLM integration** — The `LlmActor` currently echoes prompts; needs provider integration (OpenAI, Anthropic, local models)
+- [ ] **Code analysis** — Tool handlers return placeholder responses; need actual parsing and analysis
+- [ ] **Actor system wiring** — The coordinator actor is defined but not yet spawned in `main.rs`
+- [ ] **Vector search** — SeleneDB vector index integration is partially implemented
+- [ ] **External MCP clients** — `McpClientManager` is a stub ready for third-party server connections
+
+---
+
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+GNU GPLv3 — see [LICENSE](LICENSE) for details.
 
 ---
 
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request on [GitHub](https://github.com/naturesense/spire-rust).
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, and check the [issue tracker](https://github.com/naturesense/spire-rust/issues) for open issues.
+
+---
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the project history.

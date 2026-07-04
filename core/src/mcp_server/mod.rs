@@ -14,8 +14,8 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-pub mod analysis;
-pub mod embedding;
-pub mod graph;
-pub mod memory_graph;
+pub mod server;
+pub mod dispatcher;
+pub mod handler;
+pub mod tools;
 

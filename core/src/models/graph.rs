@@ -1,43 +1,25 @@
-use serde::{Deserialize, Serialize};
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (c) 2026 NatureSense
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU General Public License for more details.
+//
+// You should have received a copy of the GNU General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use selene_core::identity::{EdgeId, NodeId};
-use selene_core::value::Value;
+use serde::{Deserialize, Serialize};
 
 use crate::models::memory_graph::{GraphEdge, GraphNode};
 
-/// A node in the SeleneDB-backed graph, using SeleneDB's native types.
-///
-/// This is the low-level representation used by `GraphDb` for storage.
-/// The higher-level `GraphNode` (from `models::memory_graph`) is used
-/// for the external API.
-#[derive(Debug, Clone)]
-pub struct Node {
-    /// The SeleneDB node ID. Use `NodeId::TOMBSTONE` for new nodes.
-    pub id: NodeId,
-    /// Labels for this node (e.g., `["Person", "Developer"]`).
-    pub labels: Vec<String>,
-    /// Key-value properties.
-    pub properties: Vec<(String, Value)>,
-}
-
-/// An edge in the SeleneDB-backed graph, using SeleneDB's native types.
-///
-/// This is the low-level representation used by `GraphDb` for storage.
-#[derive(Debug, Clone)]
-pub struct Edge {
-    /// The SeleneDB edge ID.
-    pub id: EdgeId,
-    /// The source node ID.
-    pub subject: NodeId,
-    /// The predicate/label of the edge.
-    pub predicate: String,
-    /// The target node ID.
-    pub object: NodeId,
-    /// Key-value properties.
-    pub properties: Vec<(String, Value)>,
-}
-
 /// A query against the knowledge graph.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphQuery {
     pub query_type: GraphQueryType,
@@ -48,6 +30,7 @@ pub struct GraphQuery {
 }
 
 /// The type of graph query to perform.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum GraphQueryType {
     /// Find neighbors of a node
@@ -61,10 +44,10 @@ pub enum GraphQueryType {
 }
 
 /// The result of a graph query.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GraphResult {
     pub nodes: Vec<GraphNode>,
     pub edges: Vec<GraphEdge>,
     pub total_count: usize,
 }
-
