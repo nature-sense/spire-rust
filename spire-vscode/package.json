@@ -1,0 +1,68 @@
+{
+  "name": "spire-vscode",
+  "displayName": "Spire AI Assistant",
+  "description": "AI coding assistant with agent-based architecture",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "spire.openChat",
+        "title": "Open Spire Chat"
+      },
+      {
+        "command": "spire.openConfig",
+        "title": "Open Spire Configuration"
+      },
+      {
+        "command": "spire.buildProject",
+        "title": "Build Project with Spire"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "spire.openChat",
+        "key": "ctrl+shift+a",
+        "mac": "cmd+shift+a"
+      }
+    ],
+    "configuration": {
+      "title": "Spire",
+      "properties": {
+        "spire.corePath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the Spire core binary"
+        },
+        "spire.model": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "Default model to use"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^2.0.0"
+  }
+}

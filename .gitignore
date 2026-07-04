@@ -2,13 +2,13 @@
 core/target/
 
 # Node.js dependencies
-extension/node_modules/
+spire-vscode/node_modules/
 
 # TypeScript compiled output
-extension/dist/
+spire-vscode/dist/
 
 # Copied Rust binary (copied from core/target/release/ during build)
-extension/bin/
+spire-vscode/bin/
 
 # SeleneDB Write-Ahead Log persistence files (runtime data)
 *.wal
