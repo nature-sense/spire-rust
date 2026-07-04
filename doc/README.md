@@ -8,6 +8,7 @@ Reference documentation for the Spire Rust project.
 
 | Document | Description |
 |----------|-------------|
+| [`extension-core-interface.md`](extension-core-interface.md) | Complete reference for the JSON-RPC 2.0 interface between the VS Code extension and the Rust core — transport, protocol, tool catalog, notifications, lifecycle, error handling, and sequence diagrams |
 | [`messages-and-types.md`](messages-and-types.md) | Complete reference for the actor system — message enums, reply channels, and all shared data structures |
 
 ---
@@ -42,7 +43,7 @@ This is the primary reference document for the `core/` actor system. It covers:
 
 - [Root README](../README.md) — Project overview and quick start
 - [Core README](../core/README.md) — Rust MCP server documentation
-- [Extension README](../extension/README.md) — VS Code extension documentation
+- [Spire VS Code README](../spire-vscode/README.md) — VS Code extension documentation
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — Contribution guidelines
 - [CHANGELOG.md](../CHANGELOG.md) — Release history
 
