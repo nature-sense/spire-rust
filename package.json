@@ -2,12 +2,15 @@
   "name": "spire-rust",
   "private": true,
   "scripts": {
-    "build:rust": "cd core && cargo build --release",
-    "build:ts": "cd spire-vscode && npm run compile",
-    "build": "pnpm run build:rust && pnpm run build:ts && cp core/target/release/spire-rust spire-vscode/bin/",
-    "dev": "pnpm run build && code --extensionDevelopmentPath=./spire-vscode --disable-extensions",
-    "test": "pnpm run build:ts && cd spire-vscode && npm run test",
-    "package": "pnpm run build && cd spire-vscode && vsce package"
+    "build:rust": "cargo build --release --workspace",
+    "build:extension": "cd spire-extension && node esbuild.config.mjs",
+    "build": "pnpm run build:rust && pnpm run build:extension",
+    "stage:binaries": "node scripts/stage-binaries.mjs",
+    "dev": "pnpm run build && pnpm run stage:binaries && code --extensionDevelopmentPath=./spire-extension --disable-extensions",
+    "test:rust": "cargo test --workspace",
+    "test:extension": "cd spire-extension && npm test",
+    "test": "pnpm run test:rust && pnpm run test:extension",
+    "package": "pnpm run build && pnpm run stage:binaries && cd spire-extension && vsce package"
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",

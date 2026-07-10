@@ -1,17 +1,22 @@
-# Rust build artifacts
-core/target/
+# Rust build artifacts (workspace-level)
+target/
 
-# Node.js dependencies
-spire-vscode/node_modules/
+# Legacy per-crate target dirs (keep for backward compatibility)
+spire-core/target/
+mcp/*/target/
+
+# Node.js dependencies (pnpm workspace hoisting)
+node_modules/
+spire-extension/node_modules/
 
 # TypeScript compiled output
-spire-vscode/dist/
-
-# Copied Rust binary (copied from core/target/release/ during build)
-spire-vscode/bin/
+spire-extension/dist/
 
 # SeleneDB Write-Ahead Log persistence files (runtime data)
 *.wal
+
+# Pre-compiled binaries (staged by scripts/stage-binaries.mjs)
+spire-extension/bin/
 
 # VS Code extension packages
 *.vsix

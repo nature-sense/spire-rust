@@ -2,25 +2,25 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Extension (VS Code)",
+      "name": "Run Extension",
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}/extension"
+        "--extensionDevelopmentPath=${workspaceFolder:spire-rust}/spire-extension"
       ],
       "outFiles": [
-        "${workspaceFolder}/extension/dist/**/*.js"
+        "${workspaceFolder:spire-rust}/spire-extension/dist/**/*.js"
       ],
       "preLaunchTask": "Build Extension",
       "env": {
-        "SPIRE_RUST_BINARY": "${workspaceFolder}/core/target/release/spire-rust"
+        "SPIRE_CORE_BINARY": "${workspaceFolder:spire-rust}/spire-core/target/debug/spire-core"
       }
     },
     {
       "name": "Attach to Rust (lldb)",
       "type": "lldb",
       "request": "attach",
-      "program": "${workspaceFolder}/core/target/release/spire-rust",
+      "program": "${workspaceFolder:spire-rust}/spire-core/target/release/spire-core",
       "sourceLanguages": ["rust"],
       "sourceMap": {
         "/rustc/*": "${env:HOME}/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust"
@@ -30,7 +30,7 @@
   "compounds": [
     {
       "name": "Extension + Rust",
-      "configurations": ["Extension (VS Code)", "Attach to Rust (lldb)"]
+      "configurations": ["Run Extension", "Attach to Rust (lldb)"]
     }
   ]
 }

@@ -1,8 +1,8 @@
 # Spire-Rust: Actor Messages & Data Types
 
-> Reference document for the `core/` actor system — message enums, reply channels, and shared data structures.
+> Reference document for the `spire-core/` actor system — message enums, reply channels, and shared data structures.
 >
-> **Last updated:** 2026-06-30 (after GraphActor/VectorActor consolidation into MemoryGraphActor)
+> **Last updated:** 2026-08-07 (after restructure)
 
 ---
 
@@ -27,10 +27,10 @@ Four actors communicate via `tonari_actor` message passing. Each actor owns an `
 
 | Actor | File | Role |
 |-------|------|------|
-| `CoordinatorActor` | `actors/coordinator.rs` | Top-level orchestrator; receives user requests, delegates to other actors |
-| `MemoryGraphActor` | `actors/memory_graph.rs` | Sole data store — owns graph nodes, edges, and vector embeddings directly |
-| `ProgressActor` | `actors/progress.rs` | Broadcasts progress updates via `tokio::sync::broadcast` |
-| `LlmActor` | `actors/llm.rs` | LLM gateway (stub — echoes prompt) |
+| `CoordinatorActor` | `spire-core/src/actors/coordinator.rs` | Top-level orchestrator; receives user requests, delegates to other actors |
+| `MemoryGraphActor` | `spire-core/src/actors/memory_graph.rs` | Sole data store — owns graph nodes, edges, and vector embeddings directly |
+| `ProgressActor` | `spire-core/src/actors/progress.rs` | Broadcasts progress updates via `tokio::sync::broadcast` |
+| `LlmActor` | `spire-core/src/actors/llm.rs` | LLM gateway (stub — echoes prompt) |
 
 > **Note:** `GraphActor` and `VectorActor` were consolidated into `MemoryGraphActor` in June 2026. The old separate actors no longer exist. `MemoryGraphActor` now owns all data inline (in-memory `HashMap`s) rather than delegating to sub-actors.
 
@@ -38,7 +38,7 @@ Four actors communicate via `tonari_actor` message passing. Each actor owns an `
 
 ## 2. Actor Message Definitions
 
-### 2.1 `CoordinatorMessage` — `actors/coordinator.rs`
+### 2.1 `CoordinatorMessage` — `spire-core/src/actors/coordinator.rs`
 
 ```rust
 pub enum CoordinatorMessage {
@@ -67,7 +67,7 @@ pub enum CoordinatorMessage {
 
 ---
 
-### 2.2 `MemoryGraphMessage` — `actors/memory_graph.rs`
+### 2.2 `MemoryGraphMessage` — `spire-core/src/actors/memory_graph.rs`
 
 The sole data store actor. 14 variants covering all graph, memory, and maintenance operations:
 
@@ -159,7 +159,7 @@ pub enum MemoryGraphMessage {
 
 ---
 
-### 2.3 `ProgressMessage` — `actors/progress.rs`
+### 2.3 `ProgressMessage` — `spire-core/src/actors/progress.rs`
 
 ```rust
 pub enum ProgressMessage {
@@ -177,7 +177,7 @@ pub enum ProgressMessage {
 
 ---
 
-### 2.4 `LlmMessage` — `actors/llm.rs`
+### 2.4 `LlmMessage` — `spire-core/src/actors/llm.rs`
 
 ```rust
 pub enum LlmMessage {
@@ -201,7 +201,7 @@ pub enum LlmMessage {
 
 ## 3. Data Model Types
 
-### 3.1 `models/memory_graph.rs` — Core Graph Types
+### 3.1 `spire-core/src/models/memory_graph.rs` — Core Graph Types
 
 #### `GraphNode`
 
@@ -484,7 +484,7 @@ pub struct MemoryEntry {
 
 ---
 
-### 3.2 `models/graph.rs` — Query & Result Types
+### 3.2 `spire-core/src/models/graph.rs` — Query & Result Types
 
 ```rust
 pub struct GraphQuery {
@@ -513,7 +513,7 @@ pub struct GraphResult {
 
 ---
 
-### 3.3 `models/analysis.rs` — Code Analysis Types
+### 3.3 `spire-core/src/models/analysis.rs` — Code Analysis Types
 
 ```rust
 pub struct CodeAnalysisRequest {
@@ -565,7 +565,7 @@ pub struct SearchRequest {
 
 ---
 
-### 3.4 `models/embedding.rs` — Embedder Contract
+### 3.4 `spire-core/src/models/embedding.rs` — Embedder Contract
 
 ```rust
 pub struct Embedding {
@@ -590,7 +590,7 @@ pub trait Embedder: Send + Sync {
 
 ## 4. MCP Layer
 
-### 4.1 `mcp/server.rs` — Server Handler
+### 4.1 `spire-core/src/mcp/server.rs` — Server Handler
 
 ```rust
 pub struct SpireMcpHandler {
@@ -602,7 +602,7 @@ Implements `ServerHandler` from `rust-mcp-sdk`:
 - `handle_list_tools_request` → returns tools from `mcp/tools.rs`
 - `handle_call_tool_request` → dispatches to `handle_tool_call(name, args)`
 
-### 4.2 `mcp/tools.rs` — Tool Definitions
+### 4.2 `spire-core/src/mcp/tools.rs` — Tool Definitions
 
 Four tools exposed via MCP:
 
@@ -613,7 +613,7 @@ Four tools exposed via MCP:
 | `analyze_dependencies` | Dependency graph analysis | `path: string` |
 | `get_code_metrics` | Code quality metrics | `path: string` |
 
-### 4.3 `mcp/client.rs` — External MCP Client
+### 4.3 `spire-core/src/mcp/client.rs` — External MCP Client
 
 ```rust
 pub struct McpClient {
@@ -630,7 +630,7 @@ Planned to connect to 8 external MCP servers (not yet wired).
 
 ## 5. Progress Types
 
-### `ProgressUpdate` — `actors/progress.rs`
+### `ProgressUpdate` — `spire-core/src/actors/progress.rs`
 
 ```rust
 pub struct ProgressUpdate {

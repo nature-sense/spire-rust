@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Spire</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Tab Navigation Bar -->
+  <nav class="tab-bar" id="tab-bar">
+    <button class="tab-btn active" data-tab="chat">💬 Chat</button>
+    <button class="tab-btn" data-tab="mcp">🔌 MCP</button>
+    <button class="tab-btn" data-tab="agents">🤖 Agents</button>
+    <button class="tab-btn" data-tab="config">⚙ Config</button>
+  </nav>
+
+  <!-- Connection Status -->
+  <div class="connection-status">
+    <span class="status-dot disconnected" id="status-dot"></span>
+    <span id="status-text">Disconnected</span>
+  </div>
+
+  <!-- Error Banner -->
+  <div class="error-banner" id="error-banner"></div>
+
+  <!-- ── Tab: Chat ─────────────────────────────────────────────────────── -->
+  <div class="tab-content active" id="tab-chat">
+    <div class="messages" id="messages">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-state-icon">💬</div>
+        <div class="empty-state-text">Start a conversation</div>
+        <div class="empty-state-hint">Type a message below to begin chatting with Spire</div>
+      </div>
+    </div>
+
+    <!-- Typing Indicator (hidden by default) -->
+    <div class="typing-indicator hidden" id="typing-indicator">
+      <span class="typing-dot"></span>
+      <span class="typing-dot"></span>
+      <span class="typing-dot"></span>
+    </div>
+
+    <!-- Input Area -->
+    <div class="input-area">
+      <div class="input-wrapper">
+        <textarea
+          id="message-input"
+          placeholder="Type a message..."
+          rows="1"
+          autofocus
+        ></textarea>
+      </div>
+      <button class="send-btn" id="send-btn" disabled>Send</button>
+    </div>
+  </div>
+
+  <!-- ── Tab: MCP ──────────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-mcp">
+    <div class="tab-toolbar">
+      <span class="tab-toolbar-title">MCP Servers</span>
+      <button class="header-btn" id="mcp-refresh-btn" title="Refresh MCP servers">⟳ Refresh</button>
+    </div>
+    <div class="mcp-server-list" id="mcp-server-list">
+      <div class="empty-state" id="mcp-empty-state">
+        <div class="empty-state-icon">🔌</div>
+        <div class="empty-state-text">No MCP servers</div>
+        <div class="empty-state-hint">MCP servers will appear here when connected</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Tab: Agents ───────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-agents">
+    <div class="placeholder-tab">
+      <div class="placeholder-icon">🤖</div>
+      <div class="placeholder-text">Agents</div>
+      <div class="placeholder-hint">Not yet implemented</div>
+    </div>
+  </div>
+
+  <!-- ── Tab: Config ───────────────────────────────────────────────────── -->
+  <div class="tab-content" id="tab-config">
+    <div class="placeholder-tab">
+      <div class="placeholder-icon">⚙</div>
+      <div class="placeholder-text">Configuration</div>
+      <div class="placeholder-hint">Not yet implemented</div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

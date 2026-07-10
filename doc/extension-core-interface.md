@@ -1,6 +1,6 @@
 # Extension–Core Interface
 
-This document describes the communication protocol between the VS Code extension (`spire-vscode/`) and the Rust core binary (`core/`). The extension spawns the Rust binary as a child process and communicates over stdin/stdout using JSON-RPC 2.0.
+This document describes the communication protocol between the VS Code extension (`spire-extension/`) and the Rust core binary (`spire-core/`). The extension spawns the Rust binary as a child process and communicates over stdin/stdout using JSON-RPC 2.0.
 
 ---
 
@@ -50,19 +50,14 @@ This document describes the communication protocol between the VS Code extension
 │  │           Rust Core Binary                      │  │
 │  │              │                                  │  │
 │  │  ┌───────────▼──────────────┐                   │  │
-│  │  │  rust-mcp-sdk StdioTransport                 │  │
+│  │  │  StdioTransport          │                   │  │
 │  │  │  (JSON-RPC 2.0 parser)   │                   │  │
 │  │  └───────────┬──────────────┘                   │  │
 │  │              │                                  │  │
 │  │  ┌───────────▼──────────────┐                   │  │
-│  │  │  SpireMcpHandler         │                   │  │
-│  │  │  (tools/list, tools/call)│                   │  │
-│  │  └───────────┬──────────────┘                   │  │
-│  │              │                                  │  │
-│  │  ┌───────────▼──────────────┐                   │  │
 │  │  │  Actor System            │                   │  │
-│  │  │  (Coordinator, Memory,   │                   │  │
-│  │  │   Progress, LLM)         │                   │  │
+│  │  │  (Coordinator, Chat,     │                   │  │
+│  │  │   LLM, Tools, Progress)  │                   │  │
 │  │  └──────────────────────────┘                   │  │
 │  └─────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
@@ -76,7 +71,7 @@ The boundary between TypeScript and Rust is the **stdio transport**. The extensi
 
 ### Process Spawning (TypeScript side)
 
-The `McpClient` class in `spire-vscode/src/mcp/client.ts` spawns the Rust binary:
+The transport layer in `spire-extension/src/server/transport.ts` spawns the Rust binary:
 
 ```typescript
 this.process = child_process.spawn(resolvedPath, [], {
@@ -91,19 +86,19 @@ this.process = child_process.spawn(resolvedPath, [], {
 
 ### Line-Delimited JSON
 
-Messages are newline-delimited. Each JSON object is written as a single line terminated by `\n`. The Rust `rust-mcp-sdk` StdioTransport reads lines from stdin; the TypeScript `McpClient` uses Node.js `readline` to read lines from stdout.
+Messages are newline-delimited. Each JSON object is written as a single line terminated by `\n`. The Rust `StdioTransport` reads lines from stdin; the TypeScript transport uses Node.js `readline` to read lines from stdout.
 
 ### Path Resolution
 
 The extension resolves the core binary path in this order:
 
 1. **Absolute path** — used as-is
-2. **Extension directory** — checks `spire-vscode/bin/` relative to the extension install path
+2. **Extension directory** — checks `spire-extension/bin/` relative to the extension install path
 3. **PATH** — uses `which` to find the binary in the system PATH
 
 ### Reconnection
 
-If the Rust process exits or crashes, the `McpClient` attempts to reconnect with exponential backoff:
+If the Rust process exits or crashes, the transport attempts to reconnect with exponential backoff:
 
 | Attempt | Delay |
 |---------|-------|
@@ -617,7 +612,7 @@ Tool call errors are returned as JSON-RPC errors:
 If the Rust process exits unexpectedly:
 
 1. All pending requests are rejected with `"MCP connection lost"`
-2. The `McpClient` attempts reconnection with exponential backoff (up to 3 attempts)
+2. The transport attempts reconnection with exponential backoff (up to 3 attempts)
 3. If reconnection succeeds, the extension resumes normal operation
 4. If all attempts fail, the extension continues running but all tool calls will throw `"MCP client not connected"`
 
@@ -746,39 +741,39 @@ ConfigWebView   ConfigService   McpClient       Rust Core
 ```
 spire-rust/
 │
-├── spire-vscode/              ← TypeScript (UI + MCP Client)
+├── spire-extension/           ← TypeScript (UI + MCP Client)
 │   ├── src/
 │   │   ├── extension.ts       ← activate/deactivate, commands, status bar
-│   │   ├── mcp/
-│   │   │   ├── types.ts       ← JSON-RPC 2.0 type definitions
-│   │   │   └── client.ts      ← MCP stdio client (spawn, reconnect, timeouts)
-│   │   ├── services/
-│   │   │   ├── chat.ts        ← ChatService (notifications: chunk/progress/complete/error)
-│   │   │   └── config.ts      ← ConfigService (tool calls: get/set, agent run/status)
-│   │   └── webviews/
-│   │       ├── chat.ts        ← Chat WebView UI
-│   │       └── config.ts      ← Config WebView UI
-│   └── .vscode/launch.json    ← Debug launch config
+│   │   ├── client/            ← MCP client & environment client
+│   │   ├── server/            ← JSON-RPC server (router + handlers)
+│   │   │   ├── transport.ts   ← stdio transport management
+│   │   │   ├── router.ts      ← Request routing
+│   │   │   └── handlers/      ← Tool handlers (workspace, git, editor, etc.)
+│   │   ├── model/             ← Type definitions & message schemas
+│   │   ├── util/              ← Utilities (logger)
+│   │   └── webview/           ← Chat & config WebView UI
+│   └── test/                  ← Integration tests
 │
 │   ════════════════════════════════════════  ← Interface boundary (stdio JSON-RPC 2.0)
 │
-├── core/                      ← Rust (MCP Server + Actor System)
+├── spire-core/                ← Rust (Actor System + MCP Client)
 │   ├── src/
-│   │   ├── main.rs            ← Entry point (StdioTransport + SpireMcpHandler)
-│   │   ├── main_new.rs        ← Alternative entry (actor-based MCPServer)
-│   │   ├── mcp/               ← External MCP server (rust-mcp-sdk, TCP)
-│   │   │   ├── server.rs      ← SpireMcpHandler (tools/list, tools/call)
-│   │   │   ├── tools.rs       ← Tool definitions
-│   │   │   └── client.rs      ← External MCP client manager
-│   │   ├── mcp_server/        ← Embedded MCP server (actor-based, stdio)
-│   │   │   ├── server.rs      ← MCPServer (actor system owner)
-│   │   │   ├── handler.rs     ← MCPActorHandler (bridges actors → rust-mcp-sdk)
-│   │   │   ├── dispatcher.rs  ← DispatcherActor (routes tool calls)
-│   │   │   └── tools/         ← Tool implementations
-│   │   ├── actors/            ← Actor system
-│   │   ├── embedder/          ← Text embedding (Candle)
-│   │   ├── graph/             ← SeleneDB graph database
-│   │   └── models/            ← Shared data structures
+│   │   ├── main.rs            ← Entry point (StdioTransport + Actor System)
+│   │   ├── lib.rs             ← Crate root
+│   │   ├── framework/         ← Actor framework (actor, system, messages)
+│   │   ├── actors/            ← Actor implementations
+│   │   │   ├── coordinator.rs ← Workflow orchestrator
+│   │   │   ├── chat.rs        ← Chat session management
+│   │   │   ├── llm.rs         ← LLM gateway client
+│   │   │   ├── tools.rs       ← Tool registry & execution
+│   │   │   ├── vscode_tools.rs← VS Code tool bridge
+│   │   │   ├── mcp_client.rs  ← External MCP server client
+│   │   │   ├── progress.rs    ← Progress broadcaster
+│   │   │   └── system.rs      ← System management
+│   │   ├── mcp/               ← MCP protocol layer
+│   │   │   └── client.rs      ← MCP client connection manager
+│   │   └── transport/         ← stdio transport (JSON-RPC 2.0)
+│   │       └── stdio.rs       ← Line-delimited JSON over stdin/stdout
 │   └── tests/                 ← Integration tests
 │
 └── doc/                       ← Documentation
@@ -793,6 +788,6 @@ spire-rust/
 ## Related
 
 - [Root README](../README.md) — Project overview and quick start
-- [Core README](../core/README.md) — Rust MCP server documentation
-- [Spire VS Code README](../spire-vscode/README.md) — Extension documentation
+- [spire-core README](../spire-core/README.md) — Rust core documentation
+- [spire-extension README](../spire-extension/README.md) — Extension documentation
 - [messages-and-types.md](messages-and-types.md) — Actor message reference

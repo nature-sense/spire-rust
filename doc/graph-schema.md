@@ -47,6 +47,7 @@ External API (UUID strings)          SeleneDB (u64 IDs)
 | `Standard` | — | Coding standard or convention being followed |
 | `Conversation` | — | A chat conversation |
 | `Session` | — | A development session |
+| `McpServer` | `mcp_server` | An MCP server (embedded or external) |
 | `Unknown` | `#[serde(other)]` | Fallback for code-analysis types (File, Function, Class, etc.) |
 
 ### 2.2 `struct GraphNode`
@@ -397,7 +398,53 @@ Vector indexes can be created on any `(label, property)` combination. The `Memor
 
 ---
 
-## 9. Example Graph
+## 9. MCP Server Sync
+
+The `MemoryGraphActor::sync_mcp_servers()` method synchronises the graph with the current MCP configuration at startup.
+
+### Sync algorithm
+
+1. **Index existing state** — query all `McpServer` and `Tool` nodes, plus `uses_tool` edges
+2. **Build desired state** — from `McpConfig`:
+   - An `"embedded"` server node if any embedded tools are enabled
+   - One `McpServer` node per external server config
+   - `Tool` nodes for each enabled embedded tool (named after the tool)
+   - `Tool` nodes for each external server (named `"{server_name}:*"`)
+3. **Diff servers** — create missing, update type property, remove stale (cascade-deleting tools)
+4. **Diff tools per server** — create missing, remove stale
+5. **Create/remove `uses_tool` edges** — server → tool
+
+### `SyncResult`
+
+```rust
+pub struct SyncResult {
+    pub servers_added: usize,
+    pub servers_removed: usize,
+    pub tools_added: usize,
+    pub tools_removed: usize,
+    pub tools_updated: usize,
+}
+```
+
+### McpServer node properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `type` | `"embedded"` \| `"external"` | Server type |
+| `command` | `String` | (external only) Launch command |
+| `args` | `Vec<String>` | (external only) Command arguments |
+| `env` | `HashMap<String, String>` | (external only) Environment variables |
+
+### Tool node properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `server` | `String` | Name of the owning MCP server |
+| `enabled` | `bool` | Whether the tool is enabled |
+
+---
+
+## 10. Example Graph
 
 ```
 Project "my-app"

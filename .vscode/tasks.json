@@ -4,30 +4,23 @@
     {
       "label": "Build Rust Core",
       "type": "shell",
-      "command": "cargo build --release",
+      "command": "cargo build",
       "options": {
-        "cwd": "${workspaceFolder}/core"
+        "cwd": "${workspaceFolder:spire-rust}/spire-core"
       },
       "group": "build",
-      "problemMatcher": ["$rustc"]
+      "problemMatcher": []
     },
     {
       "label": "Build Extension",
       "type": "shell",
-      "command": "npm run compile",
+      "command": "npm run build",
       "options": {
-        "cwd": "${workspaceFolder}/spire-vscode"
+        "cwd": "${workspaceFolder:spire-rust}/spire-extension"
       },
       "group": "build",
       "dependsOn": ["Build Rust Core"],
       "problemMatcher": ["$tsc"]
-    },
-    {
-      "label": "Copy Binary",
-      "type": "shell",
-      "command": "cp ${workspaceFolder}/core/target/release/spire-rust ${workspaceFolder}/spire-vscode/bin/",
-      "dependsOn": ["Build Rust Core"],
-      "problemMatcher": []
     }
   ]
 }

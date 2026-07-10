@@ -7,12 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Snapshot persistence for GraphDb** (`spire-core/src/graph/mod.rs`)
+  - `GraphDb::recover()` — recover graph from snapshot + WAL on disk
+  - `GraphDb::write_snapshot()` — write point-in-time snapshot with zstd compression
+  - `GraphDb::latest_snapshot_sequence()` — query latest snapshot sequence number
+  - `GraphDb::snapshot_path()` — canonical snapshot file path helper
+  - 6 new tests covering snapshot write, recovery, empty dir, multiple snapshots, and path format
+
+- **Standalone MCP servers** (`mcp/`)
+  - `mcp-git` — Git operations MCP server (status, log, diff, blame)
+  - `mcp-process` — Process management MCP server (spawn, list, kill)
+  - `mcp-search` — Code search MCP server (ripgrep-based regex search)
+
+- **Documentation** (`doc/`)
+  - `graph-schema.md` — Complete graph schema reference (node types, relationship types, constraints, physical storage mapping)
+  - `json-rpc-protocol.md` — JSON-RPC 2.0 message reference for extension–core communication
+  - `actors-and-messages.md` — Actor catalog with message variants and wiring
+  - `agent-implementation-instructions.md` — Agent implementation guidelines
+  - `agent-infrastructure.md` — Agent infrastructure overview
+  - `vscode-environment-model.md` — VS Code environment model reference
+  - `packaging-structure.md` — Binary packaging and staging guide
+  - `test-suite-reference.md` — Test suite reference
+
 ### Changed
 
+- **Project restructure**: Renamed `core/` → `spire-core/` and `spire-vscode/` → `spire-extension/` for consistent naming
 - **License**: Changed from MIT to GNU GPLv3 (GPL-3.0-or-later)
   - Replaced `LICENSE` file with full GPLv3 text
   - Added GPLv3 SPDX and copyright headers to all source files
   - Updated README files with new license references
+- **Root `Cargo.toml`**: Added workspace manifest for `spire-core/` and MCP servers
+- **`pnpm-workspace.yaml`**: Updated to reference `spire-extension/` instead of `spire-vscode/`
+- **`.gitignore`**: Updated for new project structure
 
 ## [0.1.0] - 2025-01-07
 

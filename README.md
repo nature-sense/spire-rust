@@ -4,22 +4,23 @@
 [![VS Code](https://img.shields.io/badge/vscode-1.85%2B-blueviolet)](https://code.visualstudio.com)
 [![License](https://img.shields.io/badge/license-GPLv3-blue)](LICENSE)
 
-**Spire Rust** is a VS Code extension powered by a native Rust MCP (Model Context Protocol) server. It provides intelligent code analysis, knowledge graph traversal, and semantic search capabilities directly in the editor — all running locally with no cloud dependency.
+**Spire Rust** is an AI coding assistant for VS Code. It consists of two parts:
 
-The Rust core handles all heavy lifting: embedding generation via Candle (all-MiniLM-L6-v2), graph storage via SeleneDB, and an actor-based orchestration system. The TypeScript extension is a thin UI shell that spawns the Rust binary and communicates over stdio.
+- **`spire-core/`** — The Rust core engine (actor-based orchestration, LLM integration, knowledge graph, MCP client management). Runs as a subprocess of the extension, communicating via JSON-RPC 2.0 over stdin/stdout.
+- **`spire-extension/`** — The VS Code extension (TypeScript). Thin UI shell that spawns the Rust binary and provides the editor interface.
 
 ---
 
 ## Features
 
+- **💬 Chat Interface** — Conversational AI assistant with streaming responses
 - **🧠 Explain Code** — Select any code snippet and get an AI-powered explanation
 - **🔍 Search Codebase** — Semantic or regex-based search across your project
 - **📊 Analyze Code** — Static analysis with complexity scoring and symbol extraction
 - **🔗 Knowledge Graph** — Persistent graph database tracking project entities, decisions, and relationships
 - **📝 Memory & Context** — Recall past conversations and project context across sessions
-- **🛠️ MCP Tools** — Exposes tools via the Model Context Protocol for integration with any MCP client
-- **💬 Chat Interface** — Conversational AI assistant with streaming responses and progress indicators
-- **⚙️ Config Editor** — Manage Spire settings and run agent tasks from a dedicated WebView
+- **🛠️ MCP Tools** — Connects to external MCP servers (git, search, process) for extended capabilities
+- **⚙️ Config Editor** — Manage Spire settings from a dedicated WebView
 
 ---
 
@@ -27,107 +28,76 @@ The Rust core handles all heavy lifting: embedding generation via Candle (all-Mi
 
 ```
 spire-rust/
-├── spire-vscode/        # TypeScript VS Code Extension (thin UI shell)
+├── spire-core/            # Rust core engine (subprocess)
 │   ├── src/
-│   │   ├── extension.ts     # Lifecycle: activate/deactivate, commands, status bar
-│   │   ├── mcp/
-│   │   │   ├── types.ts     # MCP JSON-RPC 2.0 type definitions
-│   │   │   └── client.ts    # stdio MCP client with auto-reconnect & timeouts
-│   │   ├── services/
-│   │   │   ├── chat.ts      # Chat session management & streaming
-│   │   │   └── config.ts    # Configuration management & agent runner
-│   │   └── webviews/
-│   │       ├── chat.ts      # Chat panel WebView UI
-│   │       └── config.ts    # Configuration editor WebView UI
-│   └── .vscode/
-│       └── launch.json      # VS Code debug launch configuration
+│   │   ├── main.rs            # Entry point: stdio transport + actor system
+│   │   ├── lib.rs             # Crate root
+│   │   ├── framework/         # Actor framework (actor, system, messages)
+│   │   ├── actors/            # Actor implementations
+│   │   │   ├── coordinator.rs # Workflow orchestrator
+│   │   │   ├── chat.rs        # Chat session management
+│   │   │   ├── llm.rs         # LLM gateway client
+│   │   │   ├── tools.rs       # Tool registry & execution
+│   │   │   ├── vscode_tools.rs# VS Code tool bridge
+│   │   │   ├── mcp_client.rs  # External MCP server client
+│   │   │   ├── progress.rs    # Progress broadcaster
+│   │   │   └── system.rs      # System management
+│   │   ├── mcp/               # MCP protocol layer
+│   │   │   └── client.rs      # MCP client connection manager
+│   │   └── transport/         # stdio transport (JSON-RPC 2.0)
+│   │       └── stdio.rs       # Line-delimited JSON over stdin/stdout
+│   └── tests/                 # Integration tests
 │
-├── core/               # Rust MCP Server (native binary)
+├── spire-extension/       # VS Code extension (TypeScript)
 │   ├── src/
-│   │   ├── main.rs          # Entry: actor system + MCP server
-│   │   ├── mcp/             # MCP protocol (rust-mcp-sdk)
-│   │   │   ├── server.rs    # MCP message handler
-│   │   │   ├── tools.rs     # Tool definitions
-│   │   │   └── client.rs    # External MCP server connection manager
-│   │   ├── mcp_server/      # Embedded MCP server (stdio-based)
-│   │   │   ├── server.rs    # JSON-RPC server over stdin/stdout
-│   │   │   ├── handler.rs   # Request dispatcher
-│   │   │   ├── dispatcher.rs# Tool routing
-│   │   │   └── tools/       # Tool implementations
-│   │   │       ├── sample.rs
-│   │   │       ├── read_file.rs
-│   │   │       ├── write_file.rs
-│   │   │       └── list_dir.rs
-│   │   ├── actors/          # tonari-actor based system
-│   │   │   ├── coordinator.rs   # Workflow orchestrator
-│   │   │   ├── memory_graph.rs  # Knowledge graph actor (sole data store)
-│   │   │   ├── progress.rs      # Progress broadcaster
-│   │   │   └── llm.rs           # LLM gateway client
-│   │   ├── embedder/        # Text embedding (Candle + all-MiniLM-L6-v2)
-│   │   ├── graph/           # SeleneDB graph database wrapper
-│   │   └── models/          # Shared data structures
-│   └── tests/               # Integration tests
+│   │   ├── extension.ts       # Lifecycle: activate/deactivate
+│   │   ├── client/            # MCP client & environment client
+│   │   ├── server/            # JSON-RPC server (router + handlers)
+│   │   │   ├── transport.ts   # stdio transport management
+│   │   │   ├── router.ts      # Request routing
+│   │   │   └── handlers/      # Tool handlers (workspace, git, editor, etc.)
+│   │   ├── model/             # Type definitions & message schemas
+│   │   ├── util/              # Utilities (logger)
+│   │   └── webview/           # Chat & config WebView UI
+│   └── test/                  # Integration tests
 │
-└── doc/                # Reference documentation
-    ├── messages-and-types.md  # Actor message & data type reference
-    ├── graph-schema.md        # Knowledge graph schema
-    └── agent-infrastructure.md# Agent system design
+├── mcp/                   # External MCP server implementations
+│   ├── mcp-git/              # Git operations MCP server
+│   ├── mcp-process/          # Process management MCP server
+│   └── mcp-search/           # Code search MCP server
+│
+└── doc/                   # Reference documentation
+    ├── extension-core-interface.md  # JSON-RPC protocol between extension & core
+    ├── spire-actor-framework.md     # Actor system design
+    ├── json-rpc-protocol.md         # JSON-RPC 2.0 message reference
+    └── ...
 ```
 
-### Actor System
-
-The Rust core uses a `tonari-actor` based system with four actors:
+### Communication Flow
 
 ```
-                    ┌──────────────────┐
-                    │  CoordinatorActor │──→ ProgressActor (broadcast progress)
-                    │  (orchestrator)   │──→ LlmActor (LLM calls)
-                    └──────┬───────────┘
-                           │
-                           ▼
-                    MemoryGraphActor
-                    (sole data store:
-                     nodes, edges,
-                     embeddings)
-                           │
-                      Embedder (trait)
+┌──────────────────────┐     JSON-RPC 2.0      ┌──────────────────────┐
+│  spire-extension     │◄───── stdin/stdout ───▶│  spire-core          │
+│  (VS Code Extension) │                        │  (Rust subprocess)   │
+│                      │                        │                      │
+│  ┌────────────────┐  │                        │  ┌────────────────┐  │
+│  │ Server/Router  │──┼────────────────────────┼─▶│ StdioTransport │  │
+│  │ (tool handlers)│  │                        │  └────────┬───────┘  │
+│  └────────────────┘  │                        │           │          │
+│                      │                        │  ┌────────▼───────┐  │
+│  ┌────────────────┐  │                        │  │ Actor System   │  │
+│  │ Client/Transport│  │                        │  │ (coordinator,  │  │
+│  │ (stdio mgmt)   │  │                        │  │  chat, llm,    │  │
+│  └────────────────┘  │                        │  │  tools, ...)   │  │
+│                      │                        │  └────────────────┘  │
+│  ┌────────────────┐  │                        │                      │
+│  │ WebView (Chat) │  │                        │  ┌────────────────┐  │
+│  └────────────────┘  │                        │  │ MCP Clients    │──┼──▶ External MCP Servers
+│                      │                        │  │ (git, search,  │  │    (git, search, process)
+└──────────────────────┘                        │  │  process)      │  │
+                                                 │  └────────────────┘  │
+                                                 └──────────────────────┘
 ```
-
-| Actor | Role |
-|-------|------|
-| `CoordinatorActor` | Top-level orchestrator; receives user requests, delegates to other actors |
-| `MemoryGraphActor` | Sole data store — owns graph nodes, edges, and vector embeddings directly |
-| `ProgressActor` | Broadcasts progress updates via `tokio::sync::broadcast` |
-| `LlmActor` | LLM gateway client (stub — ready for provider integration) |
-
-### MCP Servers
-
-The project contains two MCP server implementations:
-
-| Server | Location | Protocol | Purpose |
-|--------|----------|----------|---------|
-| **External MCP Server** | `core/src/mcp/` | JSON-RPC over TCP (rust-mcp-sdk) | Exposes tools for external MCP clients (e.g., Cline) |
-| **Embedded MCP Server** | `core/src/mcp_server/` | JSON-RPC over stdin/stdout | Communication with the VS Code extension |
-
-### MCP Tools (External)
-
-| Tool | Description | Required Params |
-|------|-------------|-----------------|
-| `explain_code` | Explain a code snippet | `code: string` |
-| `search_codebase` | Regex or semantic search | `query: string` |
-| `analyze_dependencies` | Dependency graph analysis | `path: string` |
-| `get_code_metrics` | Code quality metrics | `path: string` |
-
-### MCP Tools (Embedded)
-
-| Tool | Description | Required Params |
-|------|-------------|-----------------|
-| `chat/send` | Send a chat message | `message: string` |
-| `chat/stream` | Stream a chat response | `message: string` |
-| `config/get` | Get configuration | — |
-| `config/set` | Set configuration | `key: string`, `value: any` |
-| `agent/run` | Run an agent task | `task: string` |
-| `agent/status` | Get agent status | — |
 
 ---
 
@@ -137,8 +107,6 @@ The project contains two MCP server implementations:
 - **Node.js** 18+
 - **pnpm** (recommended) or npm
 - **VS Code** 1.85+
-
-On first run, the embedding model (~85 MB) will be downloaded to `~/.cache/huggingface/`.
 
 ---
 
@@ -152,46 +120,14 @@ cd spire-rust
 # Install dependencies
 pnpm install
 
-# Build everything (Rust + TypeScript)
-pnpm run build
+# Build the Rust core
+cd spire-core && cargo build && cd ..
 
-# Development (build + launch VS Code debug session)
-pnpm run dev
+# Build the extension
+cd spire-extension && npm run build && cd ..
 
-# Run tests
-pnpm run test
-
-# Package as .vsix
-pnpm run package
+# Or use VS Code: Run Extension (F5) with the pre-configured launch config
 ```
-
----
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SPIRE_WAL_PATH` | `spire-graph.wal` | Path to the Write-Ahead Log file for graph persistence |
-| `SPIRE_USE_METAL` | (unset) | Set to `1` to enable Metal GPU acceleration for embeddings (may fail on unsupported ops) |
-
-### VS Code Commands
-
-| Command | Keybinding (macOS) | Keybinding (Windows/Linux) |
-|---------|-------------------|---------------------------|
-| `Spire: Open Chat` | `Cmd+Shift+A` | `Ctrl+Shift+A` |
-| `Spire: Open Config` | — | — |
-| `Spire: Build Project` | — | — |
-
-### VS Code Settings
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `spire.corePath` | `""` | Path to the Spire Rust core binary |
-| `spire.model` | `"gpt-4"` | LLM model to use |
-| `spire.maxSteps` | `10` | Maximum agent steps |
-| `spire.temperature` | `0.7` | LLM temperature |
 
 ---
 
@@ -199,8 +135,9 @@ pnpm run package
 
 | Directory | Description |
 |-----------|-------------|
-| `spire-vscode/` | VS Code extension (TypeScript) |
-| `core/` | Rust MCP server binary |
+| `spire-core/` | Rust core engine (actor system, LLM, MCP client) |
+| `spire-extension/` | VS Code extension (TypeScript) |
+| `mcp/` | External MCP server implementations |
 | `doc/` | Reference documentation |
 | `.vscode/` | VS Code debug & task configurations |
 
@@ -208,44 +145,25 @@ pnpm run package
 
 ## Development
 
-### Building Individually
+### Building
 
 ```bash
-# Build only the Rust core
-cd core && cargo build --release
+# Build the Rust core
+cd spire-core && cargo build
 
-# Build only the TypeScript extension
-cd spire-vscode && npm run compile
-```
+# Build the extension
+cd spire-extension && npm run build
 
-### Testing
+# Run Rust tests
+cd spire-core && cargo test
 
-```bash
-# Run all tests
-pnpm run test
-
-# Run Rust tests only (excluding model download tests)
-cd core && cargo test
-
-# Run embedding tests (requires model download, ~85 MB)
-cd core && cargo test -- --ignored
+# Run extension tests
+cd spire-extension && npm test
 ```
 
 ### Debugging
 
-The `.vscode/launch.json` and `.vscode/tasks.json` files provide pre-configured debug and build tasks for VS Code.
-
----
-
-## Project Status
-
-Spire Rust is in **early development** (v0.1.0). The architecture is in place, but several features are stubs awaiting implementation:
-
-- [ ] **LLM integration** — The `LlmActor` currently echoes prompts; needs provider integration (OpenAI, Anthropic, local models)
-- [ ] **Code analysis** — Tool handlers return placeholder responses; need actual parsing and analysis
-- [ ] **Actor system wiring** — The coordinator actor is defined but not yet spawned in `main.rs`
-- [ ] **Vector search** — SeleneDB vector index integration is partially implemented
-- [ ] **External MCP clients** — `McpClientManager` is a stub ready for third-party server connections
+The `.vscode/launch.json` and `.vscode/tasks.json` files provide pre-configured debug and build tasks for VS Code. Use **Run Extension** (F5) to launch a development VS Code window with the extension loaded.
 
 ---
 
@@ -258,9 +176,3 @@ GNU GPLv3 — see [LICENSE](LICENSE) for details.
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, and check the [issue tracker](https://github.com/naturesense/spire-rust/issues) for open issues.
-
----
-
-## Changelog
-
-See [CHANGELOG.md](CHANGELOG.md) for the project history.

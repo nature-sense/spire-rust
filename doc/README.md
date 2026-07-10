@@ -10,14 +10,21 @@ Reference documentation for the Spire Rust project.
 |----------|-------------|
 | [`extension-core-interface.md`](extension-core-interface.md) | Complete reference for the JSON-RPC 2.0 interface between the VS Code extension and the Rust core — transport, protocol, tool catalog, notifications, lifecycle, error handling, and sequence diagrams |
 | [`messages-and-types.md`](messages-and-types.md) | Complete reference for the actor system — message enums, reply channels, and all shared data structures |
+| [`actors-and-messages.md`](actors-and-messages.md) | Catalog of every actor in the system, their message enum variants, and how they connect |
+| [`graph-schema.md`](graph-schema.md) | Complete graph schema reference — node types, relationship types, constraints, and physical storage mapping |
+| [`json-rpc-protocol.md`](json-rpc-protocol.md) | JSON-RPC 2.0 message reference for extension–core communication |
+| [`agent-implementation-instructions.md`](agent-implementation-instructions.md) | Agent implementation guidelines and patterns |
+| [`agent-infrastructure.md`](agent-infrastructure.md) | Agent infrastructure overview and architecture |
+| [`vscode-environment-model.md`](vscode-environment-model.md) | VS Code environment model reference |
+| [`packaging-structure.md`](packaging-structure.md) | Binary packaging and staging guide |
+| [`test-suite-reference.md`](test-suite-reference.md) | Reference for all test files — Rust unit tests, JSON-RPC integration tests, and TypeScript extension tests |
 
 ---
 
 ## `messages-and-types.md`
 
-This is the primary reference document for the `core/` actor system. It covers:
+This is the primary reference document for the `spire-core/` actor system. It covers:
 
-- **Actor System Overview** — The four actors (`CoordinatorActor`, `MemoryGraphActor`, `ProgressActor`, `LlmActor`) and how they communicate
 - **Message Definitions** — All message variants with their reply types and descriptions:
   - `CoordinatorMessage` (3 variants)
   - `MemoryGraphMessage` (14 variants)
@@ -42,8 +49,4 @@ This is the primary reference document for the `core/` actor system. It covers:
 ## Related
 
 - [Root README](../README.md) — Project overview and quick start
-- [Core README](../core/README.md) — Rust MCP server documentation
-- [Spire VS Code README](../spire-vscode/README.md) — VS Code extension documentation
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — Contribution guidelines
-- [CHANGELOG.md](../CHANGELOG.md) — Release history
-
