@@ -596,15 +596,23 @@
     showTyping(true);
 
     try {
-      // Send to environment server via extension host
+      // Send user message to environment server via extension host
       await call('chat/append', {
         chatId: state.chatId,
         content: text,
         options: { role: 'user' },
       });
 
-      // The assistant reply will come as a notification
-      // (handled in the message listener below)
+      // Send the prompt to DeepSeek via llm/complete
+      const llmResult = await call('llm/complete', { prompt: text });
+      const reply = llmResult?.content || '';
+
+      // Store the assistant reply
+      await call('chat/append', {
+        chatId: state.chatId,
+        content: reply,
+        options: { role: 'assistant' },
+      });
     } catch (err) {
       showError(`Failed to send message: ${err.message}`);
       addMessage({

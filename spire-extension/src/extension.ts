@@ -427,7 +427,9 @@ async function handleCall(msg: WebviewCallMessage): Promise<void> {
   const isSubprocessMethod = msg.method.startsWith('mcp/') ||
     msg.method.startsWith('tools/') ||
     msg.method.startsWith('chat/') ||
-    msg.method.startsWith('agent/');
+    msg.method.startsWith('agent/') ||
+    msg.method.startsWith('llm/') ||
+    msg.method.startsWith('config/');
 
   try {
     let result: unknown;
