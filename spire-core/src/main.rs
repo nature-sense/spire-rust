@@ -29,7 +29,7 @@ use spire_core::actors::{
     CoordinatorActor, CoordinatorMessage,
     LlmActor, LlmConfig,
     ProgressActor, SystemActor,
-    MemoryGraphActor, MemoryGraphMessage,
+    MemoryGraphActor,
     vscode_tool_definitions,
 };
 use spire_core::graph::GraphDb;
@@ -78,10 +78,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Spire Core starting...");
     info!("Logging to: {}", log_file.display());
 
-    // ── Initialise SeleneDB graph database ──
-    let graph_db = Arc::new(GraphDb::new_in_memory()
-        .expect("Failed to create in-memory graph database"));
-    info!("SeleneDB graph database initialised (in-memory)");
+    // ── Initialise SeleneDB graph database with WAL persistence ──
+    let data_dir = if let Ok(dir) = std::env::var("SPIRE_DATA_DIR") {
+        PathBuf::from(dir)
+    } else if let Some(home) = dirs::home_dir() {
+        home.join(".spire").join("data")
+    } else {
+        std::env::temp_dir().join("spire-core-data")
+    };
+    std::fs::create_dir_all(&data_dir)
+        .expect("Failed to create data directory");
+
+    let wal_path = data_dir.join("spire.wal");
+    let graph_db = Arc::new(GraphDb::new_with_wal(&wal_path)
+        .expect("Failed to create WAL-backed graph database"));
+    info!("SeleneDB graph database initialised with WAL at: {}", wal_path.display());
 
     // ── Initialise embedding model ──
     let embedder = create_embedder()
@@ -168,6 +179,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Don't block on connectAll — it may take time to connect
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(5), resp_rx).await;
             }
+        }
+    }
+
+    // ── Load persisted DeepSeek config from the graph DB into LlmActor ──
+    {
+        // Fetch all three deepseek config keys
+        let keys = ["deepseek.api_key", "deepseek.model", "deepseek.api_url"];
+        let mut api_key = String::new();
+        let mut model = "deepseek-chat".to_string();
+        let mut api_url = "https://api.deepseek.com/v1/chat/completions".to_string();
+
+        for key in &keys {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if coordinator_tx
+                .send(CoordinatorMessage::HandleRequest {
+                    method: "config/get".to_string(),
+                    params: serde_json::json!({ "key": key }),
+                    response_tx: tx,
+                })
+                .await
+                .is_ok()
+            {
+                if let Ok(response) = rx.await {
+                    if let Some(value) = response.get("value").and_then(|v| v.as_str()) {
+                        match *key {
+                            "deepseek.api_key" => api_key = value.to_string(),
+                            "deepseek.model" => model = value.to_string(),
+                            "deepseek.api_url" => api_url = value.to_string(),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if !api_key.is_empty() {
+            info!("Loading persisted DeepSeek config: model={}, url={}", model, api_url);
+            let llm_config = LlmConfig {
+                api_key,
+                model,
+                api_url,
+                max_tokens: 4096,
+                temperature: 0.7,
+            };
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            if coordinator_tx
+                .send(CoordinatorMessage::HandleRequest {
+                    method: "llm/updateConfig".to_string(),
+                    params: serde_json::json!({
+                        "apiKey": llm_config.api_key,
+                        "model": llm_config.model,
+                        "apiUrl": llm_config.api_url,
+                        "maxTokens": llm_config.max_tokens,
+                        "temperature": llm_config.temperature,
+                    }),
+                    response_tx: tx,
+                })
+                .await
+                .is_ok()
+            {
+                let _ = rx.await;
+            }
+        } else {
+            info!("No persisted DeepSeek config found, using defaults");
         }
     }
 
@@ -273,6 +348,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Wait for shutdown signal ──
     tokio::signal::ctrl_c().await?;
     info!("Shutting down...");
+
+    // Sync/flush the WAL before shutdown
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if coordinator_tx
+            .send(CoordinatorMessage::HandleRequest {
+                method: "config/sync".to_string(),
+                params: serde_json::json!({}),
+                response_tx: tx,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+    }
 
     // Send shutdown to coordinator
     let _ = coordinator_tx

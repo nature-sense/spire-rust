@@ -403,6 +403,31 @@ impl CoordinatorActor {
                     Err(_) => serde_json::json!({"error": "LLM actor response error"}),
                 }
             }
+            "llm/updateConfig" => {
+                let api_key = params.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("deepseek-chat").to_string();
+                let api_url = params.get("apiUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let max_tokens = params.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(4096) as u32;
+                let temperature = params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if self.llm_tx.send(LlmMessage::UpdateConfig {
+                    config: crate::actors::LlmConfig {
+                        api_key,
+                        model,
+                        api_url,
+                        max_tokens,
+                        temperature,
+                    },
+                    reply_to: tx,
+                }).await.is_err() {
+                    return serde_json::json!({"error": "LLM actor not available"});
+                }
+                match rx.await {
+                    Ok(Ok(())) => serde_json::json!({"success": true}),
+                    Ok(Err(e)) => serde_json::json!({"error": e.to_string()}),
+                    Err(_) => serde_json::json!({"error": "LLM actor response error"}),
+                }
+            }
 
             // ── System methods ──
             "system/status" => {
@@ -546,6 +571,19 @@ impl CoordinatorActor {
                 }
 
                 serde_json::json!({"success": true})
+            }
+
+            // ── Config Sync (flush WAL) ──
+            "config/sync" => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if self.memory_graph_tx.send(MemoryGraphMessage::Sync { reply_to: tx }).await.is_err() {
+                    return serde_json::json!({"error": "MemoryGraph actor not available"});
+                }
+                match rx.await {
+                    Ok(Ok(())) => serde_json::json!({"success": true}),
+                    Ok(Err(e)) => serde_json::json!({"error": e.to_string()}),
+                    Err(_) => serde_json::json!({"error": "MemoryGraph actor response error"}),
+                }
             }
 
             // ── Ping / Health ──

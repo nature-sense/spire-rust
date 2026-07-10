@@ -22,6 +22,13 @@ fn mock_transport() -> Arc<Mutex<Transport>> {
     Arc::new(Mutex::new(Transport::new()))
 }
 
+/// Helper to create a mock memory graph actor for coordinator tests.
+/// Returns a `mpsc::Sender<MemoryGraphMessage>` that ignores all messages.
+fn mock_memory_graph() -> tokio::sync::mpsc::Sender<MemoryGraphMessage> {
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    tx
+}
+
 // ===========================================================================
 // ChatActor tests
 // ===========================================================================
@@ -375,9 +382,10 @@ async fn test_coordinator_ping() {
     let (progress_tx, _) = system.spawn(ProgressActor::new());
     let (system_tx, _) = system.spawn(SystemActor::new());
 
+    let memory_graph_tx = mock_memory_graph();
     let transport = mock_transport();
     let (coord_tx, _handle) = system.spawn(CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, transport,
+        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, memory_graph_tx, transport,
     ));
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -401,9 +409,10 @@ async fn test_coordinator_chat_get_active_end_to_end() {
     let (progress_tx, _) = system.spawn(ProgressActor::new());
     let (system_tx, _) = system.spawn(SystemActor::new());
 
+    let memory_graph_tx = mock_memory_graph();
     let transport = mock_transport();
     let (coord_tx, _handle) = system.spawn(CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, transport,
+        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, memory_graph_tx, transport,
     ));
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -428,9 +437,10 @@ async fn test_coordinator_chat_append_and_get_history() {
     let (progress_tx, _) = system.spawn(ProgressActor::new());
     let (system_tx, _) = system.spawn(SystemActor::new());
 
+    let memory_graph_tx = mock_memory_graph();
     let transport = mock_transport();
     let (coord_tx, _handle) = system.spawn(CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, transport,
+        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, memory_graph_tx, transport,
     ));
 
     // Append
@@ -471,9 +481,10 @@ async fn test_coordinator_tools_list() {
     let (progress_tx, _) = system.spawn(ProgressActor::new());
     let (system_tx, _) = system.spawn(SystemActor::new());
 
+    let memory_graph_tx = mock_memory_graph();
     let transport = mock_transport();
     let (coord_tx, _handle) = system.spawn(CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, transport,
+        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, memory_graph_tx, transport,
     ));
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -500,9 +511,10 @@ async fn test_coordinator_system_status() {
     let (progress_tx, _) = system.spawn(ProgressActor::new());
     let (system_tx, _) = system.spawn(SystemActor::new());
 
+    let memory_graph_tx = mock_memory_graph();
     let transport = mock_transport();
     let (coord_tx, _handle) = system.spawn(CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, transport,
+        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, memory_graph_tx, transport,
     ));
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -527,9 +539,10 @@ async fn test_coordinator_unknown_method() {
     let (progress_tx, _) = system.spawn(ProgressActor::new());
     let (system_tx, _) = system.spawn(SystemActor::new());
 
+    let memory_graph_tx = mock_memory_graph();
     let transport = mock_transport();
     let (coord_tx, _handle) = system.spawn(CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, transport,
+        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, memory_graph_tx, transport,
     ));
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -554,9 +567,10 @@ async fn test_coordinator_mcp_servers_empty() {
     let (progress_tx, _) = system.spawn(ProgressActor::new());
     let (system_tx, _) = system.spawn(SystemActor::new());
 
+    let memory_graph_tx = mock_memory_graph();
     let transport = mock_transport();
     let (coord_tx, _handle) = system.spawn(CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, transport,
+        chat_tx, tools_tx, mcp_tx, llm_tx, progress_tx, system_tx, memory_graph_tx, transport,
     ));
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();

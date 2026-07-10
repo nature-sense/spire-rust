@@ -269,7 +269,10 @@ impl MemoryGraphActor {
     /// Check whether a node with the given `(type, name)` already exists.
     fn has_duplicate(&self, node_type: &NodeType, name: &str) -> bool {
         let snapshot = self.graph_db.shared_graph().read();
-        let type_str = format!("{:?}", node_type);
+        let type_str = serde_json::to_string(node_type)
+            .unwrap_or_else(|_| format!("{:?}", node_type))
+            .trim_matches('"')
+            .to_string();
 
         if let Some(bitmap) = snapshot.nodes_with_label(&selene_db_core::db_string::DbString::try_from(LABEL_SPIRE_NODE).unwrap()) {
             for row in bitmap.iter() {
@@ -832,7 +835,10 @@ impl MemoryGraphActor {
         // Build properties
         let mut properties: Vec<(String, Value)> = Vec::new();
         properties.push((PROP_UUID.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(graph_node.id.clone()).unwrap())));
-        properties.push((PROP_NODE_TYPE.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(format!("{:?}", graph_node.node_type)).unwrap())));
+        let node_type_json = serde_json::to_string(&graph_node.node_type)
+            .unwrap_or_else(|_| format!("{:?}", graph_node.node_type));
+        let node_type_stored = node_type_json.trim_matches('"').to_string();
+        properties.push((PROP_NODE_TYPE.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(node_type_stored).unwrap())));
         properties.push((PROP_NAME.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(graph_node.name.clone()).unwrap())));
         if let Some(ref desc) = graph_node.description {
             properties.push((PROP_DESCRIPTION.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(desc.clone()).unwrap())));
@@ -1055,7 +1061,10 @@ impl Actor for MemoryGraphActor {
 
                 let mut properties: Vec<(String, Value)> = Vec::new();
                 properties.push((PROP_UUID.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(edge_uuid.clone()).unwrap())));
-                properties.push((PROP_EDGE_TYPE.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(format!("{:?}", rel.edge_type)).unwrap())));
+                let edge_type_json = serde_json::to_string(&rel.edge_type)
+                    .unwrap_or_else(|_| format!("{:?}", rel.edge_type));
+                let edge_type_stored = edge_type_json.trim_matches('"').to_string();
+                properties.push((PROP_EDGE_TYPE.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(edge_type_stored).unwrap())));
                 properties.push((PROP_CREATED_AT.to_string(), Value::String(selene_db_core::db_string::DbString::try_from(now.to_rfc3339()).unwrap())));
                 if let Some(weight) = rel.weight {
                     properties.push((PROP_WEIGHT.to_string(), Value::Float(weight)));
