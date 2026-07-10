@@ -44,12 +44,9 @@ pub struct LlmConfig {
 impl Default for LlmConfig {
     fn default() -> Self {
         Self {
-            api_url: std::env::var("DEEPSEEK_API_URL")
-                .unwrap_or_else(|_| "https://api.deepseek.com/v1/chat/completions".to_string()),
-            api_key: std::env::var("DEEPSEEK_API_KEY")
-                .unwrap_or_else(|_| "".to_string()),
-            model: std::env::var("LLM_MODEL")
-                .unwrap_or_else(|_| "deepseek-chat".to_string()),
+            api_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
+            api_key: String::new(),
+            model: "deepseek-chat".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
         }
