@@ -296,7 +296,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
     <button class="tab-btn active" data-tab="chat">💬 Chat</button>
     <button class="tab-btn" data-tab="mcp">🔌 MCP</button>
     <button class="tab-btn" data-tab="agents">🤖 Agents</button>
-    <button class="tab-btn" data-tab="config">⚙ Config</button>
   </nav>
 
   <!-- Connection Status -->
@@ -335,7 +334,50 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
           autofocus
         ></textarea>
       </div>
+      <button class="settings-btn" id="settings-btn" title="Settings">⚙</button>
       <button class="send-btn" id="send-btn" disabled>Send</button>
+    </div>
+
+    <!-- Chat Settings Panel (slide-in overlay) -->
+    <div class="chat-settings-panel hidden" id="chat-settings-panel">
+      <div class="chat-settings-header">
+        <span class="chat-settings-title">DeepSeek Configuration</span>
+        <button class="chat-settings-close" id="chat-settings-close">✕</button>
+      </div>
+      <div class="chat-settings-body">
+        <div class="config-field">
+          <label class="config-label" for="config-api-key">API Key</label>
+          <div class="config-password-wrapper">
+            <input type="password" id="config-api-key" class="config-input config-password-input" placeholder="sk-..." autocomplete="off" />
+            <button class="config-toggle-btn" id="config-toggle-key" title="Show/hide API key">👁</button>
+          </div>
+          <span class="config-hint">Your DeepSeek API key (stored securely in the graph database)</span>
+        </div>
+
+        <div class="config-field">
+          <label class="config-label" for="config-model">Model</label>
+          <select id="config-model" class="config-input config-select">
+            <option value="deepseek-chat">deepseek-chat</option>
+            <option value="deepseek-coder">deepseek-coder</option>
+            <option value="deepseek-reasoner">deepseek-reasoner</option>
+          </select>
+          <span class="config-hint">The DeepSeek model to use for completions</span>
+        </div>
+
+        <div class="config-field">
+          <label class="config-label" for="config-api-url">API URL</label>
+          <select id="config-api-url" class="config-input config-select">
+            <option value="https://api.deepseek.com/v1/chat/completions">https://api.deepseek.com/v1/chat/completions</option>
+            <option value="https://api.deepseek.com/beta/chat/completions">https://api.deepseek.com/beta/chat/completions</option>
+          </select>
+          <span class="config-hint">The DeepSeek API endpoint URL</span>
+        </div>
+
+        <div class="config-actions">
+          <button class="config-btn config-btn-primary" id="config-save-btn">Save Configuration</button>
+          <span class="config-status" id="config-status"></span>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -363,47 +405,6 @@ function getWebviewHtml(webview: vscode.Webview, context: vscode.ExtensionContex
       <div class="placeholder-icon">🤖</div>
       <div class="placeholder-text">Agents</div>
       <div class="placeholder-hint">Not yet implemented</div>
-    </div>
-  </div>
-
-  <!-- ── Tab: Config ───────────────────────────────────────────────────── -->
-  <div class="tab-content" id="tab-config">
-    <div class="tab-toolbar">
-      <span class="tab-toolbar-title">DeepSeek Configuration</span>
-    </div>
-    <div class="config-form">
-      <div class="config-field">
-        <label class="config-label" for="config-api-key">API Key</label>
-        <div class="config-password-wrapper">
-          <input type="password" id="config-api-key" class="config-input config-password-input" placeholder="sk-..." autocomplete="off" />
-          <button class="config-toggle-btn" id="config-toggle-key" title="Show/hide API key">👁</button>
-        </div>
-        <span class="config-hint">Your DeepSeek API key (stored securely in the graph database)</span>
-      </div>
-
-      <div class="config-field">
-        <label class="config-label" for="config-model">Model</label>
-        <select id="config-model" class="config-input config-select">
-          <option value="deepseek-chat">deepseek-chat</option>
-          <option value="deepseek-coder">deepseek-coder</option>
-          <option value="deepseek-reasoner">deepseek-reasoner</option>
-        </select>
-        <span class="config-hint">The DeepSeek model to use for completions</span>
-      </div>
-
-      <div class="config-field">
-        <label class="config-label" for="config-api-url">API URL</label>
-        <select id="config-api-url" class="config-input config-select">
-          <option value="https://api.deepseek.com/v1/chat/completions">https://api.deepseek.com/v1/chat/completions</option>
-          <option value="https://api.deepseek.com/beta/chat/completions">https://api.deepseek.com/beta/chat/completions</option>
-        </select>
-        <span class="config-hint">The DeepSeek API endpoint URL</span>
-      </div>
-
-      <div class="config-actions">
-        <button class="config-btn config-btn-primary" id="config-save-btn">Save Configuration</button>
-        <span class="config-status" id="config-status"></span>
-      </div>
     </div>
   </div>
 
