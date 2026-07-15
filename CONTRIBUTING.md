@@ -67,13 +67,13 @@ pnpm run test
 pnpm run dev
 
 # Build only the Rust core (faster iteration)
-cd core && cargo build
+cd rust/spire-core && cargo build
 
 # Run Rust tests
-cd core && cargo test
+cd rust/spire-core && cargo test
 
 # Run Rust tests with logging
-RUST_LOG=spire_rust=debug cargo run
+RUST_LOG=spire_core=debug cargo run
 ```
 
 ## Coding Conventions
@@ -124,19 +124,22 @@ docs: update architecture diagram
 
 ```bash
 # Run all tests (excluding model download tests)
-cd core && cargo test
+cd rust/spire-core && cargo test
 
 # Run embedding tests (requires model download, ~85 MB)
-cd core && cargo test -- --ignored
+cd rust/spire-core && cargo test -- --ignored
 
 # Run with test name filter
-cd core && cargo test embedder
+cd rust/spire-core && cargo test embedder
+
+# Run all workspace tests
+cd rust && cargo test --workspace
 ```
 
 ### TypeScript Tests
 
 ```bash
-cd extension && npm run test
+cd ts/spire-extension && npm run test
 ```
 
 ### Integration Tests
@@ -150,25 +153,47 @@ pnpm run test
 
 ```
 spire-rust/
-├── core/          # Rust MCP server (native binary)
-│   ├── src/
-│   │   ├── actors/       # Actor system (tonari-actor)
-│   │   ├── embedder/     # Text embedding (Candle)
-│   │   ├── graph/        # Graph database wrapper (SeleneDB)
-│   │   ├── mcp/          # MCP protocol layer
-│   │   └── models/       # Shared data structures
-│   └── tests/            # Integration tests
-├── extension/     # VS Code extension (TypeScript)
-│   ├── src/
-│   │   ├── ui/           # Webview chat panel, status bar
-│   │   └── mcp-client.ts # JSON-RPC MCP client
-│   └── media/            # Webview assets
-└── doc/           # Reference documentation
+├── rust/                       # All Rust crates
+│   ├── spire-core/                 # Rust core engine (subprocess)
+│   │   ├── src/
+│   │   │   ├── main.rs                # Entry point: TCP socket + actor system
+│   │   │   ├── lib.rs                 # Crate root
+│   │   │   ├── framework/             # Actor framework (actor, system, messages)
+│   │   │   ├── actors/                # Actor implementations
+│   │   │   ├── mcp/                   # MCP protocol layer
+│   │   │   ├── transport/             # TCP socket transport (JSON-RPC 2.0)
+│   │   │   ├── graph/                 # Graph database wrapper (SeleneDB)
+│   │   │   ├── embedder/              # Text embedding (Candle)
+│   │   │   └── models/                # Shared data structures
+│   │   └── tests/                     # Integration & actor tests
+│   ├── mcp/                       # External MCP server implementations
+│   │   ├── mcp-git/                  # Git operations MCP server
+│   │   ├── mcp-process/              # Process management MCP server
+│   │   ├── mcp-search/               # Code search MCP server
+│   │   ├── mcp-terminal/             # Terminal management MCP server
+│   │   └── mcp-filesystem/           # Filesystem operations MCP server
+│   └── tools/                       # Development tools
+│       └── project-analyzer/         # Project structure analyzer
+│
+├── ts/                        # All TypeScript/Node.js projects
+│   └── spire-extension/           # VS Code extension (TypeScript)
+│       ├── src/
+│       │   ├── extension.ts           # Lifecycle: activate/deactivate
+│       │   ├── client/                # Bidirectional client & environment client
+│       │   ├── server/                # JSON-RPC server (router + handlers)
+│       │   ├── model/                 # Type definitions & message schemas
+│       │   ├── util/                  # Utilities (logger)
+│       │   └── webview/               # Chat & config WebView UI
+│       └── test/                      # Integration tests
+│
+├── scripts/                    # Build & packaging scripts
+├── doc/                        # Reference documentation
+└── .vscode/                    # VS Code debug & task configurations
 ```
 
 ## Release Process
 
-1. Update version in `core/Cargo.toml` and `extension/package.json`.
+1. Update version in `rust/spire-core/Cargo.toml` and `ts/spire-extension/package.json`.
 2. Update `CHANGELOG.md`.
 3. Create a tagged release on GitHub.
 4. Build and publish the VS Code extension:

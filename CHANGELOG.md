@@ -16,10 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `GraphDb::snapshot_path()` — canonical snapshot file path helper
   - 6 new tests covering snapshot write, recovery, empty dir, multiple snapshots, and path format
 
-- **Standalone MCP servers** (`mcp/`)
+- **Standalone MCP servers** (`rust/mcp/`)
   - `mcp-git` — Git operations MCP server (status, log, diff, blame)
   - `mcp-process` — Process management MCP server (spawn, list, kill)
   - `mcp-search` — Code search MCP server (ripgrep-based regex search)
+  - `mcp-terminal` — Terminal management MCP server
+  - `mcp-filesystem` — Filesystem operations MCP server
+
+- **Chat → LLM integration** (`ts/spire-extension/`)
+  - WebView chat now calls `llm/complete` after user message and displays assistant response
+  - Extension forwards `llm/` and `config/` methods to the Rust core
 
 - **Documentation** (`doc/`)
   - `graph-schema.md` — Complete graph schema reference (node types, relationship types, constraints, physical storage mapping)
@@ -41,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Root `Cargo.toml`**: Added workspace manifest for `spire-core/` and MCP servers
 - **`pnpm-workspace.yaml`**: Updated to reference `spire-extension/` instead of `spire-vscode/`
 - **`.gitignore`**: Updated for new project structure
+- **Transport**: Changed from stdin/stdout to TCP loopback socket (`127.0.0.1:<port>`)
+
+### Fixed
+
+- **MemoryGraphActor serialization**: Fixed `NodeType` and `RelationshipType` storage to use `serde_json` (respecting `#[serde(rename)]`) instead of `Debug` format, fixing deserialization mismatches for renamed variants like `activeContext` and `belongs_to`
+
+### Removed
+
+- **Environment variable fallbacks**: Removed `DEEPSEEK_API_KEY`, `DEEPSEEK_API_URL`, and `LLM_MODEL` env var reads from `LlmConfig::default()` — config now comes exclusively from the persisted graph DB
 
 ## [0.1.0] - 2025-01-07
 

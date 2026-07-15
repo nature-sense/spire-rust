@@ -30,6 +30,13 @@ This is the primary reference document for the `spire-core/` actor system. It co
   - `MemoryGraphMessage` (14 variants)
   - `ProgressMessage` (2 variants)
   - `LlmMessage` (2 variants)
+  - `ChatMessage` (3 variants)
+  - `ToolsMessage` (2 variants)
+  - `SystemMessage` (3 variants)
+  - `McpClientMessage` (4 variants)
+  - `ProjectSyncMessage` (4 variants)
+  - `ProjectAnalyzerMessage` (2 variants)
+  - `ProjectQueryMessage` (2 variants)
 - **Data Model Types** — Full struct definitions for:
   - `GraphNode`, `NodeType`, `NodeInput`, `NodeUpdate`, `NodeFilter`
   - `GraphEdge`, `RelationshipType`, `RelationshipInput`
@@ -40,7 +47,7 @@ This is the primary reference document for the `spire-core/` actor system. It co
   - `GraphQuery`, `GraphQueryType`, `GraphResult`
   - `CodeAnalysis`, `CodeAnalysisRequest`, `ComplexityScore`, `SymbolInfo`, `SearchResult`
   - `Embedding`, `Embedder` trait
-- **MCP Layer** — Server handler, tool definitions, and external client
+- **MCP Layer** — MCP client, tool definitions, and external server connections
 - **Progress Types** — `ProgressUpdate` and `ProgressStatus`
 - **Actor Wiring Diagram** — How the actors are spawned and connected in `main.rs`
 

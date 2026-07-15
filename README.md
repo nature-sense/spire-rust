@@ -6,8 +6,8 @@
 
 **Spire Rust** is an AI coding assistant for VS Code. It consists of two parts:
 
-- **`spire-core/`** — The Rust core engine (actor-based orchestration, LLM integration, knowledge graph, MCP client management). Runs as a subprocess of the extension, communicating via JSON-RPC 2.0 over stdin/stdout.
-- **`spire-extension/`** — The VS Code extension (TypeScript). Thin UI shell that spawns the Rust binary and provides the editor interface.
+- **`rust/spire-core/`** — The Rust core engine (actor-based orchestration, LLM integration, knowledge graph, MCP client management). Runs as a subprocess of the extension, communicating via JSON-RPC 2.0 over a TCP loopback socket.
+- **`ts/spire-extension/`** — The VS Code extension (TypeScript). Thin UI shell that spawns the Rust binary and provides the editor interface.
 
 ---
 
@@ -19,7 +19,7 @@
 - **📊 Analyze Code** — Static analysis with complexity scoring and symbol extraction
 - **🔗 Knowledge Graph** — Persistent graph database tracking project entities, decisions, and relationships
 - **📝 Memory & Context** — Recall past conversations and project context across sessions
-- **🛠️ MCP Tools** — Connects to external MCP servers (git, search, process) for extended capabilities
+- **🛠️ MCP Tools** — Connects to external MCP servers (git, search, process, terminal, filesystem) for extended capabilities
 - **⚙️ Config Editor** — Manage Spire settings from a dedicated WebView
 
 ---
@@ -28,75 +28,72 @@
 
 ```
 spire-rust/
-├── spire-core/            # Rust core engine (subprocess)
-│   ├── src/
-│   │   ├── main.rs            # Entry point: stdio transport + actor system
-│   │   ├── lib.rs             # Crate root
-│   │   ├── framework/         # Actor framework (actor, system, messages)
-│   │   ├── actors/            # Actor implementations
-│   │   │   ├── coordinator.rs # Workflow orchestrator
-│   │   │   ├── chat.rs        # Chat session management
-│   │   │   ├── llm.rs         # LLM gateway client
-│   │   │   ├── tools.rs       # Tool registry & execution
-│   │   │   ├── vscode_tools.rs# VS Code tool bridge
-│   │   │   ├── mcp_client.rs  # External MCP server client
-│   │   │   ├── progress.rs    # Progress broadcaster
-│   │   │   └── system.rs      # System management
-│   │   ├── mcp/               # MCP protocol layer
-│   │   │   └── client.rs      # MCP client connection manager
-│   │   └── transport/         # stdio transport (JSON-RPC 2.0)
-│   │       └── stdio.rs       # Line-delimited JSON over stdin/stdout
-│   └── tests/                 # Integration tests
+├── rust/                       # All Rust crates
+│   ├── spire-core/                 # Rust core engine (subprocess)
+│   │   ├── src/
+│   │   │   ├── main.rs                # Entry point: TCP socket + actor system
+│   │   │   ├── lib.rs                 # Crate root
+│   │   │   ├── framework/             # Actor framework (actor, system, messages)
+│   │   │   ├── actors/                # Actor implementations
+│   │   │   ├── mcp/                   # MCP protocol layer
+│   │   │   ├── transport/             # TCP socket transport (JSON-RPC 2.0)
+│   │   │   ├── graph/                 # Graph database wrapper (SeleneDB)
+│   │   │   ├── embedder/              # Text embedding (Candle)
+│   │   │   └── models/                # Shared data structures
+│   │   └── tests/                     # Integration & actor tests
+│   ├── mcp/                       # External MCP server implementations
+│   │   ├── mcp-git/                  # Git operations MCP server
+│   │   ├── mcp-process/              # Process management MCP server
+│   │   ├── mcp-search/               # Code search MCP server
+│   │   ├── mcp-terminal/             # Terminal management MCP server
+│   │   └── mcp-filesystem/           # Filesystem operations MCP server
+│   └── tools/                       # Development tools
+│       └── project-analyzer/         # Project structure analyzer
 │
-├── spire-extension/       # VS Code extension (TypeScript)
-│   ├── src/
-│   │   ├── extension.ts       # Lifecycle: activate/deactivate
-│   │   ├── client/            # MCP client & environment client
-│   │   ├── server/            # JSON-RPC server (router + handlers)
-│   │   │   ├── transport.ts   # stdio transport management
-│   │   │   ├── router.ts      # Request routing
-│   │   │   └── handlers/      # Tool handlers (workspace, git, editor, etc.)
-│   │   ├── model/             # Type definitions & message schemas
-│   │   ├── util/              # Utilities (logger)
-│   │   └── webview/           # Chat & config WebView UI
-│   └── test/                  # Integration tests
+├── ts/                        # All TypeScript/Node.js projects
+│   └── spire-extension/           # VS Code extension (TypeScript)
+│       ├── src/
+│       │   ├── extension.ts           # Lifecycle: activate/deactivate
+│       │   ├── client/                # Bidirectional client & environment client
+│       │   ├── server/                # JSON-RPC server (router + handlers)
+│       │   ├── model/                 # Type definitions & message schemas
+│       │   ├── util/                  # Utilities (logger)
+│       │   └── webview/               # Chat & config WebView UI
+│       └── test/                      # Integration tests
 │
-├── mcp/                   # External MCP server implementations
-│   ├── mcp-git/              # Git operations MCP server
-│   ├── mcp-process/          # Process management MCP server
-│   └── mcp-search/           # Code search MCP server
-│
-└── doc/                   # Reference documentation
-    ├── extension-core-interface.md  # JSON-RPC protocol between extension & core
-    ├── spire-actor-framework.md     # Actor system design
-    ├── json-rpc-protocol.md         # JSON-RPC 2.0 message reference
-    └── ...
+├── scripts/                    # Build & packaging scripts
+├── doc/                        # Reference documentation
+└── .vscode/                    # VS Code debug & task configurations
 ```
 
 ### Communication Flow
 
 ```
-┌──────────────────────┐     JSON-RPC 2.0      ┌──────────────────────┐
-│  spire-extension     │◄───── stdin/stdout ───▶│  spire-core          │
-│  (VS Code Extension) │                        │  (Rust subprocess)   │
-│                      │                        │                      │
-│  ┌────────────────┐  │                        │  ┌────────────────┐  │
-│  │ Server/Router  │──┼────────────────────────┼─▶│ StdioTransport │  │
-│  │ (tool handlers)│  │                        │  └────────┬───────┘  │
-│  └────────────────┘  │                        │           │          │
-│                      │                        │  ┌────────▼───────┐  │
-│  ┌────────────────┐  │                        │  │ Actor System   │  │
-│  │ Client/Transport│  │                        │  │ (coordinator,  │  │
-│  │ (stdio mgmt)   │  │                        │  │  chat, llm,    │  │
-│  └────────────────┘  │                        │  │  tools, ...)   │  │
-│                      │                        │  └────────────────┘  │
-│  ┌────────────────┐  │                        │                      │
-│  │ WebView (Chat) │  │                        │  ┌────────────────┐  │
-│  └────────────────┘  │                        │  │ MCP Clients    │──┼──▶ External MCP Servers
-│                      │                        │  │ (git, search,  │  │    (git, search, process)
-└──────────────────────┘                        │  │  process)      │  │
-                                                 │  └────────────────┘  │
-                                                 └──────────────────────┘
+┌──────────────────────────┐   JSON-RPC 2.0    ┌──────────────────────────┐
+│  spire-extension         │◄─── TCP socket ───▶│  spire-core             │
+│  (VS Code Extension)     │   127.0.0.1:<port> │  (Rust subprocess)      │
+│                          │                    │                          │
+│  ┌────────────────────┐  │                    │  ┌────────────────────┐  │
+│  │ BidirectionalClient│──┼────────────────────┼─▶│ SocketTransport    │  │
+│  │ (req/resp routing) │  │                    │  └────────┬───────────┘  │
+│  └────────────────────┘  │                    │           │              │
+│                          │                    │  ┌────────▼───────────┐  │
+│  ┌────────────────────┐  │                    │  │ Actor System       │  │
+│  │ Local Router       │  │                    │  │ (coordinator,      │  │
+│  │ (workspace, editor,│  │                    │  │  chat, llm,        │  │
+│  │  git, terminal,    │  │                    │  │  tools, memory_    │  │
+│  │  diagnostics, ...) │  │                    │  │  graph, project_   │  │
+│  └────────────────────┘  │                    │  │  sync, mcp_client, │  │
+│                          │                    │  │  system, ...)      │  │
+│  ┌────────────────────┐  │                    │  └────────────────────┘  │
+│  │ WebView (Chat)     │  │                    │                          │
+│  └────────────────────┘  │                    │  ┌────────────────────┐  │
+│                          │                    │  │ MCP Clients        │──┼──▶ External MCP Servers
+│  ┌────────────────────┐  │                    │  │ (git, search,      │  │    (git, search, process,
+│  │ Status Bar         │  │                    │  │  process, terminal,│  │     terminal, filesystem)
+│  └────────────────────┘  │                    │  │  filesystem)       │  │
+└──────────────────────────┘                    │  └────────────────────┘  │
+                                                 └──────────────────────────┘
 ```
 
 ---
@@ -120,11 +117,8 @@ cd spire-rust
 # Install dependencies
 pnpm install
 
-# Build the Rust core
-cd spire-core && cargo build && cd ..
-
-# Build the extension
-cd spire-extension && npm run build && cd ..
+# Build everything (Rust workspace + extension)
+pnpm run build
 
 # Or use VS Code: Run Extension (F5) with the pre-configured launch config
 ```
@@ -135,9 +129,10 @@ cd spire-extension && npm run build && cd ..
 
 | Directory | Description |
 |-----------|-------------|
-| `spire-core/` | Rust core engine (actor system, LLM, MCP client) |
-| `spire-extension/` | VS Code extension (TypeScript) |
-| `mcp/` | External MCP server implementations |
+| `rust/spire-core/` | Rust core engine (actor system, LLM, MCP client) |
+| `rust/mcp/` | External MCP server implementations |
+| `rust/tools/` | Development tools (project-analyzer, etc.) |
+| `ts/spire-extension/` | VS Code extension (TypeScript) |
 | `doc/` | Reference documentation |
 | `.vscode/` | VS Code debug & task configurations |
 
@@ -148,18 +143,55 @@ cd spire-extension && npm run build && cd ..
 ### Building
 
 ```bash
-# Build the Rust core
-cd spire-core && cargo build
+# Build the entire Rust workspace (core + MCP servers + tools)
+cd rust && cargo build --workspace
 
 # Build the extension
-cd spire-extension && npm run build
+cd ts/spire-extension && npm run build
 
-# Run Rust tests
-cd spire-core && cargo test
+# Or build everything from the root
+pnpm run build
+
+# Run all Rust tests
+cd rust && cargo test --workspace
 
 # Run extension tests
-cd spire-extension && npm test
+cd ts/spire-extension && npm test
+
+# Run all tests from the root
+pnpm run test
 ```
+
+### Project Analyzer
+
+The `project-analyzer` tool scans a project directory and produces a structured analysis (languages, build tools, entry points, directory structure, sub-projects) — useful for giving an LLM semantic understanding of a project.
+
+```bash
+# Via the shell wrapper (recommended)
+./scripts/analyze.sh . --format pretty
+
+# Via pnpm (if pnpm is configured)
+pnpm run analyze -- . --format pretty
+
+# Directly from the rust directory
+cd rust && cargo run -p project-analyzer -- . --format pretty
+
+# JSON output (for programmatic use)
+./scripts/analyze.sh /path/to/project --format json
+
+# Skip .gitignore (include all files)
+./scripts/analyze.sh . --no-ignore --format pretty
+```
+
+Output includes:
+- **Project type** (rust_workspace, node_package, vscode_extension, python_project, etc.)
+- **Languages** with file counts and estimated line counts
+- **Build tools** with config files
+- **Entry points** (main.rs, extension.ts, package.json scripts, etc.)
+- **Directory structure** with classified directories (source_code, documentation, tests, etc.)
+- **Key files** with their roles (changelog, license, CI configs, etc.)
+- **Recursive sub-project analysis** (Cargo workspace members, pnpm workspace packages)
+- **Human-readable summary**
 
 ### Debugging
 
