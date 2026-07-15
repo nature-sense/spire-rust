@@ -1,0 +1,6 @@
+packages:
+  - "spire-extension"
+allowBuilds:
+  '@vscode/vsce-sign': set this to true or false
+  esbuild: true
+  keytar: true

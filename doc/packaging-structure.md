@@ -1,6 +1,6 @@
 # Spire Packaging Structure
 
-This document describes the packaging structure for the Spire project, including the VS Code extension (`spire-extension/`), the Rust core (`spire-core/`), and the Rust MCP servers (`mcp/`).
+This document describes the packaging structure for the Spire project, including the VS Code extension (`ts/spire-extension/`), the Rust core (`rust/spire-core/`), and the Rust MCP servers (`rust/mcp/`).
 
 ---
 
@@ -21,51 +21,60 @@ This document describes the packaging structure for the Spire project, including
 ```
 spire-rust/
 │
-├── Cargo.toml                  # ← Cargo workspace root
-├── Cargo.lock                  # ← Single lockfile for all Rust crates
-├── target/                     # ← Shared build output directory
-│
-├── spire-core/                 # Rust actor system + MCP client
-│   ├── Cargo.toml              # Workspace member
-│   ├── src/
-│   │   ├── main.rs             # Entry point
-│   │   ├── lib.rs              # Crate root
-│   │   ├── framework/          # Actor framework
-│   │   ├── actors/             # Actor implementations
-│   │   ├── mcp/                # MCP protocol layer
-│   │   └── transport/          # stdio transport
-│   └── tests/                  # Integration tests
-│
-├── mcp/                        # MCP server implementations
-│   ├── mcp-git/                # Git operations MCP server
+├── rust/                       # All Rust crates
+│   ├── Cargo.toml              # ← Cargo workspace root
+│   ├── Cargo.lock              # ← Single lockfile for all Rust crates
+│   ├── target/                 # ← Shared build output directory
+│   ├── spire-core/             # Rust actor system + MCP client
 │   │   ├── Cargo.toml          # Workspace member
-│   │   └── src/
-│   │       ├── main.rs         # MCP server entry point
-│   │       └── git_ops.rs      # Git operations implementation
-│   ├── mcp-process/            # Process management MCP server
-│   │   ├── Cargo.toml          # Workspace member
-│   │   └── src/
-│   │       ├── main.rs         # MCP server entry point
-│   │       └── process_manager.rs  # Process management implementation
-│   └── mcp-search/             # Content search MCP server
-│       ├── Cargo.toml          # Workspace member
-│       └── src/
-│           ├── main.rs         # MCP server entry point
-│           └── search_engine.rs    # Search engine implementation
+│   │   ├── src/
+│   │   │   ├── main.rs         # Entry point
+│   │   │   ├── lib.rs          # Crate root
+│   │   │   ├── framework/      # Actor framework
+│   │   │   ├── actors/         # Actor implementations
+│   │   │   ├── mcp/            # MCP protocol layer
+│   │   │   └── transport/      # stdio transport
+│   │   └── tests/              # Integration tests
+│   ├── mcp/                    # MCP server implementations
+│   │   ├── mcp-git/            # Git operations MCP server
+│   │   │   ├── Cargo.toml      # Workspace member
+│   │   │   └── src/
+│   │   │       ├── main.rs     # MCP server entry point
+│   │   │       └── git_ops.rs  # Git operations implementation
+│   │   ├── mcp-process/        # Process management MCP server
+│   │   │   ├── Cargo.toml      # Workspace member
+│   │   │   └── src/
+│   │   │       ├── main.rs     # MCP server entry point
+│   │   │       └── process_manager.rs  # Process management implementation
+│   │   └── mcp-search/         # Content search MCP server
+│   │       ├── Cargo.toml      # Workspace member
+│   │       └── src/
+│   │           ├── main.rs     # MCP server entry point
+│   │           └── search_engine.rs  # Search engine implementation
+│   └── tools/                  # Development tools
+│       └── project-analyzer/   # Project structure analyzer
+│           ├── Cargo.toml      # Workspace member
+│           └── src/
+│               ├── main.rs     # CLI entry point
+│               ├── models.rs   # Data models
+│               ├── scanner.rs  # Directory scanner
+│               └── analyzer.rs # Project analysis logic
 │
-├── spire-extension/            # VS Code extension (TypeScript)
-│   ├── bin/                    # ← Pre-compiled Rust binaries (per platform)
-│   │   ├── darwin-arm64/
-│   │   │   ├── spire-core
-│   │   │   ├── mcp-git
-│   │   │   ├── mcp-process
-│   │   │   └── mcp-search
-│   │   ├── darwin-x64/
-│   │   ├── linux-x64/
-│   │   └── win32-x64/
-│   ├── src/                    # TypeScript source
-│   ├── dist/                   # Compiled extension output
-│   └── package.json            # VS Code extension manifest
+├── ts/                         # All TypeScript/Node.js projects
+│   ├── spire-extension/        # VS Code extension (TypeScript)
+│   │   ├── bin/                # ← Pre-compiled Rust binaries (per platform)
+│   │   │   ├── darwin-arm64/
+│   │   │   │   ├── spire-core
+│   │   │   │   ├── mcp-git
+│   │   │   │   ├── mcp-process
+│   │   │   │   └── mcp-search
+│   │   │   ├── darwin-x64/
+│   │   │   ├── linux-x64/
+│   │   │   └── win32-x64/
+│   │   ├── src/                # TypeScript source
+│   │   ├── dist/               # Compiled extension output
+│   │   └── package.json        # VS Code extension manifest
+│   └── pnpm-workspace.yaml     # pnpm workspace config
 │
 ├── scripts/
 │   └── stage-binaries.mjs      # Binary staging script for VSIX packaging
@@ -97,10 +106,11 @@ The root `Cargo.toml` defines a Cargo workspace that includes all Rust crates:
 [workspace]
 resolver = "2"
 members = [
-    "spire-core",
-    "mcp/mcp-git",
-    "mcp/mcp-process",
-    "mcp/mcp-search",
+    "rust/spire-core",
+    "rust/mcp/mcp-git",
+    "rust/mcp/mcp-process",
+    "rust/mcp/mcp-search",
+    "rust/tools/project-analyzer",
 ]
 
 [workspace.package]

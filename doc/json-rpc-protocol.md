@@ -153,7 +153,7 @@ Notifications have no `id` — the server does not expect a response.
 
 See [`vscode-environment-model.md`](./vscode-environment-model.md) for the full
 domain model definitions. The TypeScript interfaces in
-`spire-extension/src/model/types.ts` are the canonical type definitions.
+`ts/spire-extension/src/model/types.ts` are the canonical type definitions.
 
 ---
 

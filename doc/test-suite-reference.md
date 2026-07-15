@@ -11,7 +11,7 @@ The Spire project maintains **2 test files** in the Rust core, plus **3 test fil
 | Layer | Language | Count | Files |
 |-------|----------|-------|-------|
 | **Rust Core** (`spire-core/tests/`) | Rust (cargo test) | 2 | `actor_tests.rs`, `integration_tests.rs` |
-| **VS Code Extension** (`spire-extension/test/`) | TypeScript (mocha) | 3 | `communication.test.mjs`, `handler-integration.test.mjs`, `mock-env-server.mjs` |
+| **VS Code Extension** (`ts/spire-extension/test/`) | TypeScript (mocha) | 3 | `communication.test.mjs`, `handler-integration.test.mjs`, `mock-env-server.mjs` |
 
 ---
 
@@ -85,9 +85,9 @@ Black-box tests that build the `spire-core` binary, spawn it as a child process,
 
 ## TypeScript Test Files
 
-### 3. `spire-extension/test/communication.test.mjs`
+### 3. `ts/spire-extension/test/communication.test.mjs`
 
-**File:** `spire-extension/test/communication.test.mjs`  
+**File:** `ts/spire-extension/test/communication.test.mjs`  
 **Lines:** ~200  
 **Test count:** ~8
 
@@ -106,9 +106,9 @@ Tests the JSON-RPC communication protocol between the extension and the Rust cor
 
 ---
 
-### 4. `spire-extension/test/handler-integration.test.mjs`
+### 4. `ts/spire-extension/test/handler-integration.test.mjs`
 
-**File:** `spire-extension/test/handler-integration.test.mjs`  
+**File:** `ts/spire-extension/test/handler-integration.test.mjs`  
 **Lines:** ~250  
 **Test count:** ~12
 
@@ -140,9 +140,9 @@ Tests the VS Code extension's request handlers against a mock environment server
 
 ---
 
-### 5. `spire-extension/test/mock-env-server.mjs`
+### 5. `ts/spire-extension/test/mock-env-server.mjs`
 
-**File:** `spire-extension/test/mock-env-server.mjs`  
+**File:** `ts/spire-extension/test/mock-env-server.mjs`  
 **Lines:** ~150
 
 A mock VS Code environment server used by the handler integration tests. Simulates VS Code API responses for testing purposes.
@@ -171,8 +171,8 @@ cargo test integration       # Integration tests
 ### TypeScript Tests
 
 ```bash
-# From spire-extension/
-cd spire-extension
+# From ts/spire-extension/
+cd ts/spire-extension
 
 # Run all TS tests
 npm test

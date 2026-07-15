@@ -4,7 +4,7 @@
  * Stage compiled Rust binaries into the VS Code extension's bin/ directory.
  *
  * After `cargo build --release --workspace`, this script copies the
- * platform-specific binaries into spire-extension/bin/<platform>/ so they
+ * platform-specific binaries into ts/spire-extension/bin/<platform>/ so they
  * are bundled into the .vsix package.
  *
  * Usage:
@@ -46,10 +46,12 @@ const platformDir = `${os}-${arch}`;
 // ── Binary names ─────────────────────────────────────────────────────────
 
 const binaries = [
-  { name: 'spire-core', crate: 'spire-core' },
-  { name: 'mcp-git', crate: 'mcp/mcp-git' },
-  { name: 'mcp-process', crate: 'mcp/mcp-process' },
-  { name: 'mcp-search', crate: 'mcp/mcp-search' },
+  { name: 'spire-core', crate: 'rust/spire-core' },
+  { name: 'mcp-git', crate: 'rust/mcp/mcp-git' },
+  { name: 'mcp-process', crate: 'rust/mcp/mcp-process' },
+  { name: 'mcp-search', crate: 'rust/mcp/mcp-search' },
+  { name: 'mcp-terminal', crate: 'rust/mcp/mcp-terminal' },
+  { name: 'mcp-filesystem', crate: 'rust/mcp/mcp-filesystem' },
 ];
 
 const ext = process.platform === 'win32' ? '.exe' : '';
@@ -57,7 +59,7 @@ const ext = process.platform === 'win32' ? '.exe' : '';
 // ── Copy binaries ────────────────────────────────────────────────────────
 
 const targetDir = join(root, 'target', 'release');
-const destDir = join(root, 'spire-extension', 'bin', platformDir);
+const destDir = join(root, 'ts', 'spire-extension', 'bin', platformDir);
 
 if (!existsSync(destDir)) {
   mkdirSync(destDir, { recursive: true });

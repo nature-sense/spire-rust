@@ -1,0 +1,34 @@
+{
+  "servers": [
+    {
+      "name": "mcp-git",
+      "command": "/Users/steve/naturesense/tools/spire-rust/ts/spire-extension/bin/darwin-arm64/mcp-git",
+      "args": [],
+      "env": null
+    },
+    {
+      "name": "mcp-process",
+      "command": "/Users/steve/naturesense/tools/spire-rust/ts/spire-extension/bin/darwin-arm64/mcp-process",
+      "args": [],
+      "env": null
+    },
+    {
+      "name": "mcp-search",
+      "command": "/Users/steve/naturesense/tools/spire-rust/ts/spire-extension/bin/darwin-arm64/mcp-search",
+      "args": [],
+      "env": null
+    },
+    {
+      "name": "mcp-terminal",
+      "command": "/Users/steve/naturesense/tools/spire-rust/ts/spire-extension/bin/darwin-arm64/mcp-terminal",
+      "args": [],
+      "env": null
+    },
+    {
+      "name": "mcp-filesystem",
+      "command": "/Users/steve/naturesense/tools/spire-rust/ts/spire-extension/bin/darwin-arm64/mcp-filesystem",
+      "args": [],
+      "env": null
+    }
+  ]
+}

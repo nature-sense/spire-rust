@@ -2,15 +2,17 @@
   "name": "spire-rust",
   "private": true,
   "scripts": {
-    "build:rust": "cargo build --release --workspace",
-    "build:extension": "cd spire-extension && node esbuild.config.mjs",
+    "build:rust": "cd rust && cargo build --release --workspace",
+    "build:extension": "cd ts/spire-extension && node esbuild.config.mjs",
     "build": "pnpm run build:rust && pnpm run build:extension",
+    "download:model": "bash scripts/download-embedding-model.sh",
     "stage:binaries": "node scripts/stage-binaries.mjs",
-    "dev": "pnpm run build && pnpm run stage:binaries && code --extensionDevelopmentPath=./spire-extension --disable-extensions",
-    "test:rust": "cargo test --workspace",
-    "test:extension": "cd spire-extension && npm test",
+    "dev": "pnpm run build && pnpm run download:model && pnpm run stage:binaries && code --extensionDevelopmentPath=./ts/spire-extension --disable-extensions",
+    "analyze": "cd rust && cargo run -p project-analyzer --",
+    "test:rust": "cd rust && cargo test --workspace",
+    "test:extension": "cd ts/spire-extension && npm test",
     "test": "pnpm run test:rust && pnpm run test:extension",
-    "package": "pnpm run build && pnpm run stage:binaries && cd spire-extension && vsce package"
+    "package": "pnpm run build && pnpm run stage:binaries && cd ts/spire-extension && vsce package"
   },
   "devDependencies": {
     "@types/vscode": "^1.90.0",

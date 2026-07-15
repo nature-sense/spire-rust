@@ -304,7 +304,8 @@ The `McpConfig` system provides configuration for external MCP server connection
 | Priority | Source | Path |
 |----------|--------|------|
 | 1 | `SPIRE_MCP_CONFIG` env var | Arbitrary path |
-| 2 | Default | `~/.spire/mcp-config.json` |
+| 2 | Default (project-local) | `{SPIRE_PROJECT_ROOT}/.spire/mcp-config.json` |
+| 3 | Fallback | `~/.spire/mcp-config.json` |
 
 ### Config structure
 
@@ -332,7 +333,7 @@ The `McpConfig` system provides configuration for external MCP server connection
 ### Loading flow
 
 1. `main.rs` calls `McpConfig::load()` at startup
-2. If `~/.spire/mcp-config.json` doesn't exist, no external servers are configured
+2. If no config file is found (project-local or fallback), no external servers are configured
 3. External server configs are stored for later connection by `McpClientActor`
 
 ---

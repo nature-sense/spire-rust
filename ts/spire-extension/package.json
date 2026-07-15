@@ -1,0 +1,63 @@
+{
+  "name": "spire-extension",
+  "displayName": "Spire Extension",
+  "description": "VS Code environment server exposing editor, workspace, terminal, git, diagnostics, and chat via JSON-RPC over stdin/stdout",
+  "version": "0.1.0",
+  "publisher": "naturesense",
+  "license": "GPL-3.0-or-later",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "icon": "media/icon.png",
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "spire-sidebar",
+          "title": "Spire",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "spire-sidebar": [
+        {
+          "type": "webview",
+          "id": "spire.chatView",
+          "name": "Spire Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "spire.openChat",
+        "title": "Spire: Open Chat"
+      },
+      {
+        "command": "spire.restartEnvServer",
+        "title": "Spire: Restart Environment Server"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "test": "node test/communication.test.mjs",
+    "test:old": "node --experimental-vm-modules test/test-harness.mjs",
+    "lint": "tsc --noEmit",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0"
+  }
+}

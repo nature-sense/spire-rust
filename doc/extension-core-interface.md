@@ -1,6 +1,6 @@
 # Extension–Core Interface
 
-This document describes the communication protocol between the VS Code extension (`spire-extension/`) and the Rust core binary (`spire-core/`). The extension spawns the Rust binary as a child process and communicates over stdin/stdout using JSON-RPC 2.0.
+This document describes the communication protocol between the VS Code extension (`ts/spire-extension/`) and the Rust core binary (`rust/spire-core/`). The extension spawns the Rust binary as a child process and communicates over stdin/stdout using JSON-RPC 2.0.
 
 ---
 
@@ -741,7 +741,7 @@ ConfigWebView   ConfigService   McpClient       Rust Core
 ```
 spire-rust/
 │
-├── spire-extension/           ← TypeScript (UI + MCP Client)
+├── ts/spire-extension/        ← TypeScript (UI + MCP Client)
 │   ├── src/
 │   │   ├── extension.ts       ← activate/deactivate, commands, status bar
 │   │   ├── client/            ← MCP client & environment client
@@ -756,7 +756,7 @@ spire-rust/
 │
 │   ════════════════════════════════════════  ← Interface boundary (stdio JSON-RPC 2.0)
 │
-├── spire-core/                ← Rust (Actor System + MCP Client)
+├── rust/spire-core/           ← Rust (Actor System + MCP Client)
 │   ├── src/
 │   │   ├── main.rs            ← Entry point (StdioTransport + Actor System)
 │   │   ├── lib.rs             ← Crate root
@@ -788,6 +788,6 @@ spire-rust/
 ## Related
 
 - [Root README](../README.md) — Project overview and quick start
-- [spire-core README](../spire-core/README.md) — Rust core documentation
-- [spire-extension README](../spire-extension/README.md) — Extension documentation
+- [spire-core README](../rust/spire-core/README.md) — Rust core documentation
+- [spire-extension README](../ts/spire-extension/README.md) — Extension documentation
 - [messages-and-types.md](messages-and-types.md) — Actor message reference

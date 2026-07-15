@@ -6,7 +6,7 @@
       "type": "shell",
       "command": "cargo build",
       "options": {
-        "cwd": "${workspaceFolder:spire-rust}/spire-core"
+        "cwd": "${workspaceFolder:spire-rust}/rust/spire-core"
       },
       "group": "build",
       "problemMatcher": []
@@ -16,7 +16,7 @@
       "type": "shell",
       "command": "npm run build",
       "options": {
-        "cwd": "${workspaceFolder:spire-rust}/spire-extension"
+        "cwd": "${workspaceFolder:spire-rust}/ts/spire-extension"
       },
       "group": "build",
       "dependsOn": ["Build Rust Core"],

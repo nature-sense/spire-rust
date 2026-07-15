@@ -6,21 +6,21 @@
       "type": "extensionHost",
       "request": "launch",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder:spire-rust}/spire-extension"
+        "--extensionDevelopmentPath=${workspaceFolder:spire-rust}/ts/spire-extension"
       ],
       "outFiles": [
-        "${workspaceFolder:spire-rust}/spire-extension/dist/**/*.js"
+        "${workspaceFolder:spire-rust}/ts/spire-extension/dist/**/*.js"
       ],
       "preLaunchTask": "Build Extension",
       "env": {
-        "SPIRE_CORE_BINARY": "${workspaceFolder:spire-rust}/spire-core/target/debug/spire-core"
+        "SPIRE_CORE_BINARY": "${workspaceFolder:spire-rust}/rust/spire-core/target/debug/spire-core"
       }
     },
     {
       "name": "Attach to Rust (lldb)",
       "type": "lldb",
       "request": "attach",
-      "program": "${workspaceFolder:spire-rust}/spire-core/target/release/spire-core",
+      "program": "${workspaceFolder:spire-rust}/rust/spire-core/target/release/spire-core",
       "sourceLanguages": ["rust"],
       "sourceMap": {
         "/rustc/*": "${env:HOME}/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust"

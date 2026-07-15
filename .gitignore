@@ -2,21 +2,25 @@
 target/
 
 # Legacy per-crate target dirs (keep for backward compatibility)
-spire-core/target/
-mcp/*/target/
+rust/spire-core/target/
+rust/mcp/*/target/
 
 # Node.js dependencies (pnpm workspace hoisting)
 node_modules/
-spire-extension/node_modules/
+ts/spire-extension/node_modules/
 
 # TypeScript compiled output
-spire-extension/dist/
+ts/spire-extension/dist/
 
 # SeleneDB Write-Ahead Log persistence files (runtime data)
 *.wal
 
+# Project-local Spire data directory (graph database, logs, config)
+.spire/
+
+
 # Pre-compiled binaries (staged by scripts/stage-binaries.mjs)
-spire-extension/bin/
+ts/spire-extension/bin/
 
 # VS Code extension packages
 *.vsix

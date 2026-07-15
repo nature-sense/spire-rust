@@ -444,7 +444,108 @@ pub struct SyncResult {
 
 ---
 
-## 10. Example Graph
+## 10. MCP Config Storage
+
+The graph stores MCP server configuration in a dedicated section of the graph, enabling persistence across restarts and import/export via JSON files.
+
+### 10.1 Node Types
+
+| Node Type | Label | Purpose |
+|-----------|-------|---------|
+| `McpConfig` | `mcp_config` | Root config node (singleton) |
+| `McpServer` | `mcp_server` | An MCP server definition |
+| `McpTool` | `mcp_tool` | A tool provided by an MCP server |
+
+### 10.2 Relationship Types
+
+| Relationship | Label | Purpose |
+|-------------|-------|---------|
+| `HasMcpServer` | `has_mcp_server` | McpConfig → McpServer |
+| `HasMcpTool` | `has_mcp_tool` | McpServer → McpTool |
+
+### 10.3 McpConfig node properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `name` | `String` | Always `"mcp-config"` |
+| `version` | `u32` | Config version (incremented on import) |
+| `imported_at` | `String` | ISO 8601 timestamp of last import |
+| `source_file` | `String` | Path to the source JSON file (if imported) |
+
+### 10.4 McpServer node properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `name` | `String` | Server name (e.g. `"filesystem"`, `"github.com/..."`) |
+| `server_type` | `"embedded"` \| `"external"` | Server type |
+| `enabled` | `bool` | Whether the server is enabled |
+| `command` | `String` | (external only) Launch command |
+| `args` | `Vec<String>` | (external only) Command arguments |
+| `env` | `HashMap<String, String>` | (external only) Environment variables |
+| `description` | `String` | Human-readable description |
+
+### 10.5 McpTool node properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `name` | `String` | Tool name |
+| `enabled` | `bool` | Whether the tool is enabled |
+| `description` | `String` | Tool description |
+| `input_schema` | `Value` (JSON) | JSON Schema for tool parameters |
+
+### 10.6 Bootstrap / Sync
+
+On startup, the `MemoryGraphActor` bootstraps the MCP config from the `mcp-config.json` file:
+
+1. **Check if McpConfig node exists** — if not, create it
+2. **Read `mcp-config.json`** — parse the JSON file
+3. **Diff servers** — compare graph state with file state:
+   - Create missing `McpServer` nodes
+   - Update changed server properties
+   - Remove stale servers (cascade-delete tools)
+4. **Diff tools per server** — create missing, remove stale
+5. **Create/remove `has_mcp_server` and `has_mcp_tool` edges**
+
+The bootstrap runs as part of the startup progress sequence (before `percent=100`).
+
+### 10.7 Import via UI
+
+The MCP tab in the webview has an **Import** button (⚙) that:
+
+1. Sends a `mcpImportConfig` message to the extension host
+2. Extension host opens a VS Code file dialog (filtered to `*.json`)
+3. Reads the selected JSON file
+4. Validates it as valid JSON
+5. Calls `mcp/config/import` on the Rust subprocess
+6. The subprocess stores the config in the graph (same diff algorithm as bootstrap)
+7. Sends `event/mcp/config/imported` notification to refresh the UI
+
+### 10.8 JSON Format
+
+The imported JSON file follows the standard MCP configuration format:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "node",
+      "args": ["/path/to/server.js"],
+      "env": {
+        "KEY": "value"
+      }
+    },
+    "github.com/org/repo": {
+      "command": "uvx",
+      "args": ["mcp-server"],
+      "env": {}
+    }
+  }
+}
+```
+
+---
+
+## 11. Example Graph
 
 ```
 Project "my-app"
