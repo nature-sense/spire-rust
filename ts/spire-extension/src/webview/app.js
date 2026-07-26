@@ -1500,11 +1500,14 @@
   document.getElementById('clear-btn').addEventListener('click', clearChat);
   document.getElementById('new-chat-btn').addEventListener('click', newChat);
 
-  // ── Project Tab (read-only project analysis) ──────────────────────────────
+  // ── Project Tab (graph + overview) ────────────────────────────────────────
 
   const projectContent = document.getElementById('project-content');
   const projectEmptyState = document.getElementById('project-empty-state');
   const projectRefreshBtn = document.getElementById('project-refresh-btn');
+  const projectOverviewBtn = document.getElementById('project-overview-btn');
+  const projectGraphBtn = document.getElementById('project-graph-btn');
+  const projectGraph = document.getElementById('project-graph');
 
   /**
    * Load project analysis data from the core subprocess.
@@ -1669,6 +1672,198 @@
   projectRefreshBtn.addEventListener('click', function() {
     loadProjectAnalysis();
   });
+
+  // View toggle: Overview ↔ Graph
+  projectOverviewBtn.addEventListener('click', function() {
+    projectContent.classList.remove('hidden');
+    projectGraph.classList.add('hidden');
+    projectOverviewBtn.classList.add('active-view');
+    projectGraphBtn.classList.remove('active-view');
+  });
+
+  projectGraphBtn.addEventListener('click', function() {
+    projectContent.classList.add('hidden');
+    projectGraph.classList.remove('hidden');
+    projectOverviewBtn.classList.remove('active-view');
+    projectGraphBtn.classList.add('active-view');
+    renderProjectGraph();
+  });
+
+  /**
+   * Render the project tree as a Cytoscape.js interactive graph.
+   * Transforms the analysis data (ProjectFileTree) into nodes and edges.
+   */
+  function renderProjectGraph() {
+    const cyEl = document.getElementById('cy');
+    if (!cyEl) return;
+
+    // Clear any existing graph
+    cyEl.innerHTML = '';
+
+    // Collect nodes and edges from the last loaded analysis data
+    const cy = cytoscape({
+      container: cyEl,
+      style: [
+        {
+          selector: 'node',
+          style: {
+            'background-color': '#4a90d9',
+            'label': 'data(label)',
+            'font-size': '10px',
+            'text-valign': 'bottom',
+            'color': '#ccc',
+            'width': 'mapData(fileCount, 0, 500, 30, 80)',
+            'height': 'mapData(fileCount, 0, 500, 30, 80)',
+          }
+        },
+        {
+          selector: 'node[role = "source_code"]',
+          style: { 'background-color': '#4a90d9' }
+        },
+        {
+          selector: 'node[role = "tests"]',
+          style: { 'background-color': '#50b86c' }
+        },
+        {
+          selector: 'node[role = "documentation"]',
+          style: { 'background-color': '#e6a817' }
+        },
+        {
+          selector: 'node[role = "build_config"]',
+          style: { 'background-color': '#9b59b6', shape: 'diamond' }
+        },
+        {
+          selector: 'node[role = "config"]',
+          style: { 'background-color': '#e74c3c', shape: 'square' }
+        },
+        {
+          selector: 'edge',
+          style: {
+            'width': 1,
+            'line-color': '#555',
+            'target-arrow-color': '#555',
+            'target-arrow-shape': 'triangle',
+            'arrow-scale': 0.6,
+            'curve-style': 'bezier'
+          }
+        },
+        {
+          selector: 'edge[label = "builds"]',
+          style: { 'line-color': '#9b59b6', 'target-arrow-color': '#9b59b6' }
+        },
+        {
+          selector: 'edge[label = "packages"]',
+          style: { 'line-color': '#2ecc71', 'target-arrow-color': '#2ecc71', 'width': 2 }
+        }
+      ],
+      layout: { name: 'dagre', rankDir: 'TB', padding: 20 }
+    });
+
+    // Build elements from the project structure
+    const elements = [];
+
+    // Add project root
+    elements.push({
+      group: 'nodes',
+      data: { id: 'root', label: 'Project Root', role: 'root', fileCount: 0 }
+    });
+
+    // Add build systems as nodes
+    // Build metadata might have build_types, config_files, etc.
+    // Add languages
+    // Add directories from the analysis
+
+    // For now, load from the analysis data that was already fetched
+    // We store it in the closure scope
+    if (window._lastAnalysis) {
+      const analysis = window._lastAnalysis;
+      addDirectoryNodes(elements, analysis.root || analysis.overview, 'root');
+    }
+
+    cy.add(elements);
+    cy.layout({ name: 'dagre', rankDir: 'TB', padding: 20 }).run();
+
+    // Enable node selection tooltip
+    cy.on('tap', 'node', function(evt) {
+      const node = evt.target;
+      const data = node.data();
+      const tooltip = document.createElement('div');
+      tooltip.className = 'cy-tooltip';
+      tooltip.innerHTML = '<strong>' + (data.label || data.id) + '</strong>'
+        + (data.path ? '<br>Path: ' + data.path : '')
+        + (data.language ? '<br>Language: ' + data.language : '')
+        + (data.fileCount ? '<br>Files: ' + data.fileCount : '')
+        + (data.lines ? '<br>Lines: ' + data.lines : '');
+      tooltip.style.cssText = 'position:fixed;background:#333;color:#fff;padding:6px 10px;border-radius:4px;font-size:11px;z-index:1000;pointer-events:none;max-width:300px';
+      document.body.appendChild(tooltip);
+      const pos = evt.originalEvent;
+      tooltip.style.left = (pos.clientX + 12) + 'px';
+      tooltip.style.top = (pos.clientY + 12) + 'px';
+      setTimeout(() => tooltip.remove(), 3000);
+    });
+  }
+
+  /**
+   * Recursively add directory nodes from the analysis data.
+   */
+  function addDirectoryNodes(elements, node, parentId) {
+    if (!node || !node.name) return;
+
+    const id = node.path || node.name;
+    const role = node.role || 'directory';
+    const fileCount = node.total_file_count || node.file_count || 0;
+    const lines = node.total_lines || node.lines || 0;
+
+    elements.push({
+      group: 'nodes',
+      data: {
+        id: id,
+        label: node.name,
+        role: role,
+        path: node.path || '',
+        fileCount: fileCount,
+        lines: lines,
+        language: node.language || ''
+      }
+    });
+
+    elements.push({
+      group: 'edges',
+      data: { id: parentId + '-' + id, source: parentId, target: id }
+    });
+
+    // Add subdirectories
+    if (node.directories) {
+      node.directories.forEach(function(dir) {
+        addDirectoryNodes(elements, dir, id);
+      });
+    }
+
+    // Add files summary as a synthetic node
+    if (node.files && node.files.length > 0) {
+      const filesId = id + '-files';
+      elements.push({
+        group: 'nodes',
+        data: {
+          id: filesId,
+          label: node.files.length + ' files',
+          role: 'other',
+          fileCount: node.files.length
+        }
+      });
+      elements.push({
+        group: 'edges',
+        data: { id: id + '-files-edge', source: id, target: filesId }
+      });
+    }
+  }
+
+  // Store last analysis data for graph rendering (overlays the text render)
+  const _origRenderProject = renderProjectAnalysis;
+  renderProjectAnalysis = function(analysis) {
+    window._lastAnalysis = analysis;
+    _origRenderProject(analysis);
+  };
 
   // ── Tools Tab (real-time tool usage feed) ─────────────────────────────────
 

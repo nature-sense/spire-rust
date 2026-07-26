@@ -98,11 +98,13 @@
     </div>
   </div>
 
-  <!-- ── Tab: Project (read-only project analysis) ────────────────────── -->
+  <!-- ── Tab: Project (graphical project overview) ────────────────────── -->
   <div class="tab-content" id="tab-project">
     <div class="tab-toolbar">
       <span class="tab-toolbar-title">Project Analysis</span>
       <div style="display:flex;gap:4px">
+        <button class="header-btn active-view" id="project-overview-btn" title="Text overview">📋 Overview</button>
+        <button class="header-btn" id="project-graph-btn" title="Graph view">🔗 Graph</button>
         <button class="header-btn" id="project-refresh-btn" title="Refresh project analysis">⟳ Refresh</button>
       </div>
     </div>
@@ -113,8 +115,22 @@
         <div class="empty-state-hint">Loading project overview...</div>
       </div>
     </div>
+    <div class="project-graph hidden" id="project-graph">
+      <div class="graph-legend">
+        <span class="legend-item"><span class="legend-dot" style="background:#4a90d9"></span> Source</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#50b86c"></span> Tests</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#e6a817"></span> Docs</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#9b59b6"></span> Build</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#e74c3c"></span> Config</span>
+        <span class="legend-item"><span class="legend-dot" style="background:#95a5a6"></span> Other</span>
+      </div>
+      <div id="cy"></div>
+    </div>
   </div>
 
+  <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

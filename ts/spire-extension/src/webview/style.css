@@ -1709,6 +1709,57 @@ body {
   text-align: center;
 }
 
+/* ── Project Graph View ─────────────────────────────── */
+.project-graph {
+  display: flex;
+  flex-direction: column;
+  height: calc(100% - 44px);
+  position: relative;
+}
+
+.project-graph.hidden {
+  display: none;
+}
+
+#cy {
+  flex: 1;
+  min-height: 300px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+/* View toggle buttons */
+.header-btn.active-view {
+  background: var(--accent);
+  color: white;
+  border-color: var(--accent);
+}
+
 /* ── Utility ─────────────────────────────────────────────────────────── */
 
 .hidden {
