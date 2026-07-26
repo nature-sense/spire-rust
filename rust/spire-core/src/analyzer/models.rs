@@ -43,6 +43,8 @@ pub struct ProjectFileTree {
     pub languages: Vec<LanguageInfo>,
     /// Detected packaging information (e.g. how to build and distribute).
     pub packaging: Option<PackagingInfo>,
+    /// Detected packaging information (e.g. how to build and distribute).
+    pub packaging: Option<PackagingInfo>,
 }
 
 /// Normalized metadata for all detected build systems in a project.
@@ -139,4 +141,27 @@ pub struct NodeInfo {
     pub scripts: Vec<BuildScript>,
     pub dependencies: Vec<String>,
     pub dev_dependencies: Vec<String>,
+}
+
+// ============================================================================
+// Packaging Types
+// ============================================================================
+
+/// Packaging information for the project — how to build and distribute
+/// the final artifact. Detected by analyzing package.json build configs,
+/// VSCode extension manifests, and binary staging scripts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackagingInfo {
+    /// Type of packager (e.g. "vsce", "npm", "docker", "python-wheels")
+    pub packager_type: String,
+    /// Human-readable description
+    pub description: String,
+    /// Compiled native binaries that must be staged before packaging
+    pub native_binaries: Vec<String>,
+    /// The staging directory for native binaries (relative to project root)
+    pub binary_staging_dir: Option<String>,
+    /// The entry point for the package (e.g. extension.js main file)
+    pub package_entry_point: Option<String>,
+    /// Missing dependencies that would prevent packaging
+    pub missing_dependencies: Vec<String>,
 }
