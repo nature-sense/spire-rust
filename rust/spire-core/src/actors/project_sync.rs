@@ -1257,10 +1257,14 @@ impl ProjectSyncActor {
             )
             .await?;
 
-        // 8. Commit the transaction atomically
+        // 8. Detect and store Packaging nodes (VS Code extension packaging)
+        self.detect_packaging(&stream, project_root).await?;
+
+        // 9. Commit the transaction atomically
         stream.commit().await?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
+
         info!("ProjectSync: bootstrap complete in {}ms", result.duration_ms);
         Ok(result)
     }
@@ -2202,6 +2206,193 @@ impl ProjectSyncActor {
         }
 
         Ok(result)
+    }
+
+    // ── Packaging Detection ──────────────────────────────────────────────
+
+    /// Detect VS Code extension packaging configuration and store it in the graph.
+    ///
+    /// Scans the project for a VS Code extension manifest (`ts/spire-extension/package.json`)
+    /// and its native binary dependencies (Cargo crates), then creates:
+    /// - A `Packaging` node with packager type, entry point, and staging info
+    /// - `INCLUDES` relationships from the Packaging node to each BuildSystem node
+    ///
+    /// This makes the packaging pipeline discoverable via graph queries
+    /// (traversing `INCLUDES` edges) and executable via the `project/package` tool.
+    async fn detect_packaging(
+        &self,
+        stream: &TransactionStream,
+        project_root: &Path,
+    ) -> Result<()> {
+        // Check for VS Code extension manifest
+        let ext_pkg_path = project_root.join("ts").join("spire-extension").join("package.json");
+        if !ext_pkg_path.exists() {
+            return Ok(());
+        }
+
+        // Read the package.json to confirm it's a VS Code extension
+        let ext_pkg_content = std::fs::read_to_string(&ext_pkg_path)?;
+        let ext_pkg: serde_json::Value = serde_json::from_str(&ext_pkg_content)?;
+        let is_vsce = ext_pkg.get("engines")
+            .and_then(|e| e.get("vscode"))
+            .is_some();
+        if !is_vsce {
+            return Ok(());
+        }
+
+        let pkg_name = ext_pkg.get("name")
+            .and_then(|n| n.as_str())
+            .unwrap_or("extension")
+            .to_string();
+        let pkg_version = ext_pkg.get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("0.0.0")
+            .to_string();
+
+        // Check if vsce is available in devDependencies
+        let has_vsce = ext_pkg.get("devDependencies")
+            .and_then(|d| d.as_object())
+            .map(|d| d.contains_key("@vscode/vsce"))
+            .unwrap_or(false);
+
+        // Native binaries that are bundled into the VSIX
+        let native_binaries = vec![
+            "spire-core",
+            "mcp-git",
+            "mcp-process",
+            "mcp-search",
+            "mcp-terminal",
+            "mcp-filesystem",
+            "mcp-cargo",
+            "mcp-node",
+        ];
+
+        // Extract extension entry point
+        let entry_point = ext_pkg.get("main")
+            .and_then(|m| m.as_str())
+            .unwrap_or("dist/extension.js")
+            .to_string();
+
+        let mut missing = Vec::new();
+        if !has_vsce {
+            missing.push("@vscode/vsce".to_string());
+        }
+
+        // Build the packaging description
+        let description = format!(
+            "VS Code Extension: {pkg_name} v{pkg_version} ({})",
+            if missing.is_empty() { "ready to package" } else { "missing dependencies" }
+        );
+
+        // Store the Packaging node
+        let pkg_node = stream
+            .store_node(NodeInput {
+                node_type: NodeType::Packaging,
+                subtype: None,
+                name: format!("{}-{}.vsix", pkg_name, pkg_version),
+                description: Some(description),
+                properties: Some({
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "packager_type".to_string(),
+                        serde_json::Value::String("vsce".to_string()),
+                    );
+                    m.insert(
+                        "entry_point".to_string(),
+                        serde_json::Value::String(entry_point),
+                    );
+                    m.insert(
+                        "staging_dir".to_string(),
+                        serde_json::Value::String("bin/<platform>/".to_string()),
+                    );
+                    m.insert(
+                        "missing".to_string(),
+                        serde_json::Value::Array(
+                            missing.into_iter().map(serde_json::Value::String).collect(),
+                        ),
+                    );
+                    m
+                }),
+                embedding_id: None,
+            })
+            .await?;
+
+        // Query existing BuildSystem nodes to create INCLUDES relationships
+        let existing_bs = self
+            .query_nodes(NodeFilter {
+                node_type: None,
+                subtype: Some("BuildSystem".to_string()),
+                name: None,
+                status: None,
+                tags: None,
+                limit: None,
+                offset: None,
+                properties: None,
+            })
+            .await?;
+
+        // Match native binary names to BuildSystem nodes by checking
+        // if the build system's project_name contains the binary name
+        for binary_name in &native_binaries {
+            for bs_node in &existing_bs {
+                let proj_name = bs_node.properties.get("project_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if proj_name == *binary_name || proj_name.contains(binary_name) {
+                    stream
+                        .create_relationship(RelationshipInput {
+                            edge_type: RelationshipType::Custom("INCLUDES".to_string()),
+                            from_id: pkg_node.id.clone(),
+                            to_id: bs_node.id.clone(),
+                            properties: Some({
+                                let mut m = HashMap::new();
+                                m.insert(
+                                    "role".to_string(),
+                                    serde_json::Value::String("native_binary".to_string()),
+                                );
+                                m.insert(
+                                    "binary_name".to_string(),
+                                    serde_json::Value::String(binary_name.to_string()),
+                                );
+                                m
+                            }),
+                            weight: None,
+                        })
+                        .await?;
+                }
+            }
+        }
+
+        // Link the extension's build system (npm/pnpm) as package_source
+        for bs_node in &existing_bs {
+            let proj_name = bs_node.properties.get("project_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if proj_name == "spire-extension" || bs_node.name.contains("package.json") {
+                stream
+                    .create_relationship(RelationshipInput {
+                        edge_type: RelationshipType::Custom("INCLUDES".to_string()),
+                        from_id: pkg_node.id.clone(),
+                        to_id: bs_node.id.clone(),
+                        properties: Some({
+                            let mut m = HashMap::new();
+                            m.insert(
+                                "role".to_string(),
+                                serde_json::Value::String("package_source".to_string()),
+                            );
+                            m
+                        }),
+                        weight: None,
+                    })
+                    .await?;
+            }
+        }
+
+        info!(
+            "ProjectSync: detected VS Code extension packaging: {}-{}.vsix",
+            pkg_name, pkg_version
+        );
+        Ok(())
     }
 
     // ── Force Resync ─────────────────────────────────────────────────────
