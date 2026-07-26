@@ -181,6 +181,9 @@ pub enum NodeType {
     /// A single step within an execution plan
     #[serde(rename = "planStep")]
     PlanStep,
+    /// A distributable package produced by this project (e.g. .vsix, wheel, docker image)
+    #[serde(rename = "packaging")]
+    Packaging,
     /// Fallback for code-analysis node types (File, Function, Class, etc.)
     #[serde(other)]
     Unknown,

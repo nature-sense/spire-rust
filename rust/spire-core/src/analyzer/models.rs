@@ -1,205 +1,107 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
-// Copyright (c) 2026 NatureSense
-
-//! Data models for the project analyzer.
-//!
-//! These types represent the full semantic structure of a project:
-//! - [`FileInfo`]: A single file or directory entry from scanning.
-//! - [`DirectoryNode`]: A directory in the hierarchical tree.
-//! - [`FileNode`]: A file in the hierarchical tree.
-//! - [`ProjectFileTree`]: The complete analysis result.
-//! - [`BuildMetadata`]: Normalized build system metadata.
-//! - [`LanguageInfo`]: Language statistics.
-
 use serde::{Deserialize, Serialize};
 
 /// A single file or directory entry from scanning.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileInfo {
-    /// Absolute path to the file.
     pub path: String,
-    /// Path relative to the scan root.
     pub relative_path: String,
-    /// File extension (e.g. ".rs", ".ts", "" for no extension).
     pub extension: String,
-    /// File size in bytes.
     pub size: u64,
-    /// Whether this entry is a directory.
     pub is_dir: bool,
-    /// Whether this entry is a symlink.
     pub is_symlink: bool,
 }
 
 /// A directory in the hierarchical file tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectoryNode {
-    /// Directory name (last component).
     pub name: String,
-    /// Path relative to the project root.
     pub path: String,
-    /// Semantic role (e.g. "source_code", "tests", "documentation").
     pub role: String,
-    /// Subdirectories.
     pub directories: Vec<DirectoryNode>,
-    /// Files in this directory.
     pub files: Vec<FileNode>,
-    /// Total number of files in this directory (recursive).
     pub total_file_count: usize,
-    /// Total estimated lines of code (recursive).
     pub total_lines: usize,
 }
 
 /// A file in the hierarchical file tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileNode {
-    /// File name (last component).
     pub name: String,
-    /// Path relative to the project root.
     pub path: String,
-    /// File extension (e.g. ".rs", ".ts").
     pub extension: String,
-    /// Detected programming language.
     pub language: String,
-    /// File size in bytes.
     pub size: u64,
-    /// Estimated lines of code.
     pub lines_estimated: usize,
-    /// Semantic role (e.g. "source", "test", "config", "documentation").
     pub role: String,
 }
 
 /// The complete result of a project analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectFileTree {
-    /// Root directory node (the project root).
     pub root: DirectoryNode,
-    /// Merged build metadata from all build config files.
     pub build: BuildMetadata,
-    /// Detected languages, sorted by file count descending.
     pub languages: Vec<LanguageInfo>,
+    /// Detected packaging information (e.g. how to build and distribute).
+    pub packaging: Option<PackagingInfo>,
 }
 
-/// Normalized build system metadata.
-///
-/// This is the universal representation of any build system's configuration.
-/// Each build system parser (Cargo, npm, Meson, etc.) converts its native
-/// format into this structure.
+/// Normalized metadata for all detected build systems in a project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildMetadata {
-    /// Project name (if available).
-    #[serde(default)]
-    pub project_name: Option<String>,
-    /// Project version (if available).
-    #[serde(default)]
-    pub version: Option<String>,
-    /// Detected project type (e.g. "rust_crate", "node_package", "meson_project").
-    #[serde(default)]
-    pub project_type: String,
-    /// Build system name (e.g. "Cargo", "npm", "Meson").
-    #[serde(default)]
-    pub build_system: String,
-    /// Whether this is a workspace/multi-module project.
-    #[serde(default)]
-    pub is_workspace: bool,
-    /// Workspace member paths (if applicable).
-    #[serde(default)]
-    pub workspace_members: Vec<WorkspaceMember>,
-    /// Available build scripts/targets.
-    #[serde(default)]
-    pub scripts: Vec<BuildScript>,
-    /// Feature flags (if applicable).
-    #[serde(default)]
-    pub features: Vec<Feature>,
-    /// Build targets (executables, libraries, etc.).
-    #[serde(default)]
-    pub targets: Vec<BuildTarget>,
-    /// Build config file paths.
-    #[serde(default)]
+    /// Detected build system types
+    pub build_types: Vec<String>,
+    /// Build system config files found
     pub config_files: Vec<String>,
-    /// Raw parsed data (build-system-specific).
-    #[serde(default)]
-    pub raw: Option<serde_json::Value>,
+    /// Available build commands from package.json scripts (if Node.js project)
+    pub node_scripts: Vec<BuildScript>,
+    /// Cargo workspace members (if Rust workspace)
+    pub workspace_members: Vec<String>,
+    /// Entry points detected (main.rs, extension.ts, etc.)
+    pub entry_points: Vec<String>,
+    /// Backward-compat: project name (derived from first workspace member or directory)
+    pub project_name: Option<String>,
+    /// Backward-compat: project type (e.g. "rust_workspace", "vscode_extension")
+    pub project_type: String,
+    /// Backward-compat: primary build system (e.g. "Cargo", "npm")
+    pub build_system: String,
 }
 
-/// A workspace member in a multi-module project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceMember {
-    /// Member name.
-    pub name: String,
-    /// Path relative to workspace root.
-    pub path: String,
-    /// Version (if available).
-    pub version: Option<String>,
-}
-
-/// A build script or task.
+/// A single script entry from package.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildScript {
-    /// Script name (e.g. "build", "test").
     pub name: String,
-    /// Shell command to run (legacy — prefer tool_call).
-    #[serde(default)]
     pub command: String,
-    /// Recommended tool call to execute this script.
-    /// E.g. `{"tool": "project/build", "args": {"mode": "debug"}}`
-    /// When present, agents should use this tool call instead of running the shell command.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call: Option<serde_json::Value>,
 }
 
-/// A feature flag or build option.
+/// Packaging information for the project — how to build and distribute
+/// the final artifact. Detected by analyzing package.json build configs,
+/// VSCode extension manifests, and binary staging scripts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Feature {
-    /// Feature name.
-    pub name: String,
-    /// Description (if available).
-    pub description: Option<String>,
-    /// Whether this feature is enabled by default.
-    pub default: bool,
+pub struct PackagingInfo {
+    /// Type of packager (e.g. "vsce", "npm", "docker", "python-wheels")
+    pub packager_type: String,
+    /// Human-readable description
+    pub description: String,
+    /// Compiled native binaries that must be staged before packaging
+    pub native_binaries: Vec<String>,
+    /// The staging directory for native binaries (relative to project root)
+    pub binary_staging_dir: Option<String>,
+    /// The entry point for the package (e.g. extension.js main file)
+    pub package_entry_point: Option<String>,
+    /// Missing dependencies that would prevent packaging
+    pub missing_dependencies: Vec<String>,
 }
 
-/// A build target (executable, library, etc.).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildTarget {
-    /// Target name.
-    pub name: String,
-    /// Target kind (e.g. "bin", "lib", "executable", "test").
-    pub kind: String,
-    /// Source file path (if available).
-    pub source_path: Option<String>,
-}
-
-/// A dependency.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Dependency {
-    /// Dependency name.
-    pub name: String,
-    /// Version requirement string.
-    pub version_req: Option<String>,
-    /// Dependency kind (e.g. "normal", "dev", "build").
-    pub kind: String,
-    /// Source type (e.g. "registry", "git", "path", "system", "wrap").
-    pub source: String,
-    /// Source URL (if applicable).
-    pub source_url: Option<String>,
-}
-
-/// Language statistics.
+/// Language statistics from analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LanguageInfo {
-    /// Language name (e.g. "Rust", "TypeScript").
     pub name: String,
-    /// File extensions associated with this language.
-    pub extensions: Vec<String>,
-    /// Number of files in this language.
     pub file_count: usize,
-    /// Estimated total lines of code.
-    pub estimated_lines: usize,
+    pub total_lines: usize,
+    pub extensions: Vec<String>,
 }
 
-// ── Rust-specific metadata (from cargo_metadata) ──────────────────────────
-
-/// Rich Rust project metadata from `cargo metadata`.
+/// Rust-specific metadata from `cargo metadata`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CargoInfo {
     pub name: String,
@@ -215,54 +117,26 @@ pub struct CargoInfo {
     pub readme: Option<String>,
     pub categories: Vec<String>,
     pub keywords: Vec<String>,
-    pub publish: Option<Vec<String>>,
     pub dependencies: Vec<CargoDependency>,
     pub features: std::collections::HashMap<String, Vec<String>>,
-    pub targets: Vec<CargoTarget>,
-    pub workspace_members: Vec<CargoWorkspaceMember>,
-    pub workspace_resolver: Option<String>,
 }
 
-/// A dependency from Cargo.toml.
+/// A single dependency from `cargo metadata`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CargoDependency {
     pub name: String,
-    pub version_req: Option<String>,
-    pub kind: String,
+    pub version_req: String,
     pub optional: bool,
     pub features: Vec<String>,
-    pub source: Option<String>,
-    pub git: Option<String>,
-    pub path: Option<String>,
 }
 
-/// A build target from Cargo.toml.
+/// Node.js-specific metadata from package.json analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CargoTarget {
-    pub name: String,
-    pub kind: Vec<String>,
-    pub src_path: String,
-    pub edition: Option<String>,
-    pub required_features: Vec<String>,
-    pub crate_types: Vec<String>,
-}
-
-/// Capabilities advertised by an MCP server via `describe_analysis_capabilities`.
-///
-/// This is the response shape returned by build-system MCP servers (mcp-cargo,
-/// mcp-node, etc.) when queried about what build files they can analyze.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerCapability {
-    /// Build file patterns this server can handle (e.g. `["Cargo.toml"]`).
-    pub supported_files: Vec<String>,
-    /// Name of the tool to call for analysis (e.g. `"analyze"`).
-    pub analyzer_tool: String,
-}
-
-/// A workspace member from Cargo.toml.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CargoWorkspaceMember {
+pub struct NodeInfo {
     pub name: String,
     pub version: String,
-    pub path: String,
+    pub private: bool,
+    pub scripts: Vec<BuildScript>,
+    pub dependencies: Vec<String>,
+    pub dev_dependencies: Vec<String>,
 }
