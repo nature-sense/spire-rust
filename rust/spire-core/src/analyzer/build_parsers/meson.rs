@@ -103,18 +103,22 @@ pub fn parse_meson_build(project_root: &Path) -> Option<BuildMetadata> {
     scripts.push(BuildScript {
         name: "setup".to_string(),
         command: "meson setup builddir".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "setup"}})),
     });
     scripts.push(BuildScript {
         name: "compile".to_string(),
         command: "meson compile -C builddir".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "compile"}})),
     });
     scripts.push(BuildScript {
         name: "test".to_string(),
         command: "meson test -C builddir".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "test"}})),
     });
     scripts.push(BuildScript {
         name: "install".to_string(),
         command: "meson install -C builddir".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "install"}})),
     });
 
     let workspace_members: Vec<WorkspaceMember> = subprojects

@@ -1,0 +1,18 @@
+{
+  "mcp-cargo/build":                ["build"],
+  "mcp-cargo/test":                 ["test"],
+  "mcp-cargo/check":                ["check"],
+  "mcp-cargo/clean":                ["clean"],
+  "mcp-cargo/add-dependency":       ["add-dependency"],
+  "mcp-cargo/update-dependencies":  ["update-dependencies"],
+  "mcp-cargo/analyze":              ["analyze"],
+  "mcp-node/build":                 ["build"],
+  "mcp-node/test":                  ["test"],
+  "mcp-node/run":                   ["run"],
+  "mcp-filesystem/read_file":       ["read-file"],
+  "mcp-filesystem/write_file":      ["write-file"],
+  "mcp-filesystem/search_files":    ["search-files"],
+  "mcp-terminal/execute_command":   ["execute-command"],
+  "mcp-git/*":                      ["git"],
+  "mcp-search/*":                   ["search-web"]
+}

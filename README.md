@@ -17,9 +17,11 @@
 - **🧠 Explain Code** — Select any code snippet and get an AI-powered explanation
 - **🔍 Search Codebase** — Semantic or regex-based search across your project
 - **📊 Analyze Code** — Static analysis with complexity scoring and symbol extraction
-- **🔗 Knowledge Graph** — Persistent graph database tracking project entities, decisions, and relationships
+- **🔗 Knowledge Graph** — Persistent graph database (SeleneDB) tracking project entities, decisions, and relationships
 - **📝 Memory & Context** — Recall past conversations and project context across sessions
 - **🛠️ MCP Tools** — Connects to external MCP servers (git, search, process, terminal, filesystem) for extended capabilities
+- **🔨 Build-Fix Loop** — Automatic build → error detection → fix → rebuild cycle
+- **📋 Plan Mode** — Deliberate multi-step execution plans with approve/pause/retry/skip controls
 - **⚙️ Config Editor** — Manage Spire settings from a dedicated WebView
 
 ---
@@ -34,21 +36,21 @@ spire-rust/
 │   │   │   ├── main.rs                # Entry point: TCP socket + actor system
 │   │   │   ├── lib.rs                 # Crate root
 │   │   │   ├── framework/             # Actor framework (actor, system, messages)
-│   │   │   ├── actors/                # Actor implementations
-│   │   │   ├── mcp/                   # MCP protocol layer
+│   │   │   ├── actors/                # 20+ actor implementations
+│   │   │   ├── mcp/                   # MCP protocol client
 │   │   │   ├── transport/             # TCP socket transport (JSON-RPC 2.0)
 │   │   │   ├── graph/                 # Graph database wrapper (SeleneDB)
-│   │   │   ├── embedder/              # Text embedding (Candle)
+│   │   │   ├── embedder/              # Text embedding (Candle/DeepSeek)
 │   │   │   └── models/                # Shared data structures
 │   │   └── tests/                     # Integration & actor tests
-│   ├── mcp/                       # External MCP server implementations
-│   │   ├── mcp-git/                  # Git operations MCP server
-│   │   ├── mcp-process/              # Process management MCP server
-│   │   ├── mcp-search/               # Code search MCP server
-│   │   ├── mcp-terminal/             # Terminal management MCP server
-│   │   └── mcp-filesystem/           # Filesystem operations MCP server
-│   └── tools/                       # Development tools
-│       └── project-analyzer/         # Project structure analyzer
+│   └── mcp/                       # External MCP server implementations
+│       ├── mcp-git/                  # Git operations MCP server
+│       ├── mcp-process/              # Process management MCP server
+│       ├── mcp-search/               # Code search MCP server
+│       ├── mcp-terminal/             # Terminal management MCP server
+│       ├── mcp-filesystem/           # Filesystem operations MCP server
+│       ├── mcp-cargo/                # Cargo build MCP server
+│       └── mcp-node/                 # Node.js build MCP server
 │
 ├── ts/                        # All TypeScript/Node.js projects
 │   └── spire-extension/           # VS Code extension (TypeScript)
@@ -62,9 +64,39 @@ spire-rust/
 │       └── test/                      # Integration tests
 │
 ├── scripts/                    # Build & packaging scripts
+├── config/                     # Intent, MCP, and tool capability configs
 ├── doc/                        # Reference documentation
 └── .vscode/                    # VS Code debug & task configurations
 ```
+
+### Actor System
+
+20 actors communicate via `tokio::sync::mpsc` channels, all spawned by the singleton `ActorSystem`:
+
+| Actor | Role |
+|-------|------|
+| **CoordinatorActor** | Top-level orchestrator; receives user requests, routes to intent router or LLM |
+| **IntentRouterActor** | Matches user queries to registered intents (build, fix, plan, etc.) |
+| **PromptHandlerActor** | Builds LLM prompts with context injection (graph, system prompt, tools) |
+| **ChatActor** | Manages chat dialogs and message history |
+| **LlmActor** | LLM gateway — sends prompts to DeepSeek API, returns streaming responses |
+| **MemoryGraphActor** | Sole data store — owns GraphDb (SeleneDB) for nodes, edges, and embeddings |
+| **ToolOrchestrator** | Executes tools and tool chains with step context (template resolution) |
+| **ToolRouterActor** | Routes `project/*`, `build/*`, `test/*` calls to the right actor or MCP |
+| **BuildOrchestrator** | Manages the build-fix loop lifecycle (build → fix → rebuild) |
+| **ErrorAnalyzer** | Matches build errors to fix strategies via graph lookup |
+| **PlanOrchestrator** (NEW) | Creates, stores, and executes multi-step plans with approve/reject flow |
+| **ProjectBuildActor** | Per-system build execution via MCP tools |
+| **ProjectTestActor** | Test execution via MCP tools |
+| **ProjectLintActor** | Lint execution via MCP tools |
+| **ProjectInstallActor** | Package installation via MCP tools |
+| **ProjectAnalyzerActor** | Semantic project analysis for LLM context |
+| **ProjectQueryActor** | Structured project queries for LLM context |
+| **ProjectSyncActor** | Three-phase project structure sync |
+| **SystemPromptActor** | Caches system prompt prefix (DeepSeek prompt caching) |
+| **McpClientActor** | Manages external MCP server connections |
+| **ProgressActor** | Broadcasts progress updates via `tokio::sync::broadcast` |
+| **SystemActor** | System state machine, startup phase chain |
 
 ### Communication Flow
 
@@ -78,19 +110,19 @@ spire-rust/
 │  │ (req/resp routing) │  │                    │  └────────┬───────────┘  │
 │  └────────────────────┘  │                    │           │              │
 │                          │                    │  ┌────────▼───────────┐  │
-│  ┌────────────────────┐  │                    │  │ Actor System       │  │
-│  │ Local Router       │  │                    │  │ (coordinator,      │  │
-│  │ (workspace, editor,│  │                    │  │  chat, llm,        │  │
-│  │  git, terminal,    │  │                    │  │  tools, memory_    │  │
-│  │  diagnostics, ...) │  │                    │  │  graph, project_   │  │
-│  └────────────────────┘  │                    │  │  sync, mcp_client, │  │
-│                          │                    │  │  system, ...)      │  │
-│  ┌────────────────────┐  │                    │  └────────────────────┘  │
-│  │ WebView (Chat)     │  │                    │                          │
-│  └────────────────────┘  │                    │  ┌────────────────────┐  │
-│                          │                    │  │ MCP Clients        │──┼──▶ External MCP Servers
-│  ┌────────────────────┐  │                    │  │ (git, search,      │  │    (git, search, process,
-│  │ Status Bar         │  │                    │  │  process, terminal,│  │     terminal, filesystem)
+│  ┌────────────────────┐  │                    │  │ CoordinatorActor   │  │
+│  │ Local Router       │  │                    │  │ (orchestrator)     │──┼──▶ IntentRouter → ...
+│  │ (workspace, editor,│  │                    │  │                    │  │
+│  │  git, terminal,    │  │                    │  │  ┌─plan_orch──────┐│  │
+│  │  diagnostics, ...) │  │                    │  │  │ PlanOrchestrator││  │
+│  └────────────────────┘  │                    │  │  └────────────────┘│  │
+│                          │                    │  └────────────────────┘  │
+│  ┌────────────────────┐  │                    │                          │
+│  │ WebView (Chat)     │  │                    │  ┌────────────────────┐  │
+│  └────────────────────┘  │                    │  │ MCP Clients        │──┼──▶ External MCP Servers
+│                          │                    │  │ (cargo, git,       │  │    (git, search, process,
+│  ┌────────────────────┐  │                    │  │  search, process,  │  │     terminal, filesystem)
+│  │ Status Bar         │  │                    │  │  terminal, node,   │  │
 │  └────────────────────┘  │                    │  │  filesystem)       │  │
 └──────────────────────────┘                    │  └────────────────────┘  │
                                                  └──────────────────────────┘
@@ -114,27 +146,14 @@ spire-rust/
 git clone https://github.com/naturesense/spire-rust.git
 cd spire-rust
 
-# Install dependencies
-pnpm install
+# Build the Rust workspace
+cd rust && cargo build --workspace
 
-# Build everything (Rust workspace + extension)
-pnpm run build
+# Build the extension
+cd ts/spire-extension && npm install && npm run build
 
 # Or use VS Code: Run Extension (F5) with the pre-configured launch config
 ```
-
----
-
-## Project Structure
-
-| Directory | Description |
-|-----------|-------------|
-| `rust/spire-core/` | Rust core engine (actor system, LLM, MCP client) |
-| `rust/mcp/` | External MCP server implementations |
-| `rust/tools/` | Development tools (project-analyzer, etc.) |
-| `ts/spire-extension/` | VS Code extension (TypeScript) |
-| `doc/` | Reference documentation |
-| `.vscode/` | VS Code debug & task configurations |
 
 ---
 
@@ -143,55 +162,49 @@ pnpm run build
 ### Building
 
 ```bash
-# Build the entire Rust workspace (core + MCP servers + tools)
+# Build the entire Rust workspace (core + MCP servers)
 cd rust && cargo build --workspace
 
 # Build the extension
 cd ts/spire-extension && npm run build
-
-# Or build everything from the root
-pnpm run build
 
 # Run all Rust tests
 cd rust && cargo test --workspace
 
 # Run extension tests
 cd ts/spire-extension && npm test
-
-# Run all tests from the root
-pnpm run test
 ```
 
-### Project Analyzer
+### Intent System
 
-The `project-analyzer` tool scans a project directory and produces a structured analysis (languages, build tools, entry points, directory structure, sub-projects) — useful for giving an LLM semantic understanding of a project.
+The intent router in `config/intents.json` defines 11 registered intents:
 
-```bash
-# Via the shell wrapper (recommended)
-./scripts/analyze.sh . --format pretty
+| Intent | Handler | Priority | Example triggers |
+|--------|---------|----------|-----------------|
+| `build` | BuildOrchestrator | 10 | "build", "compile", "cargo build" |
+| `plan` | PlanOrchestrator | 8 | "plan how to", "create a plan", "make a plan for" |
+| `fix-build-error` | PlanOrchestrator | 9 | "fix build", "build failed", "compilation error" |
+| `test` | BuildOrchestrator | 8 | "test", "run tests", "cargo test" |
+| `lint` | BuildOrchestrator | 5 | "lint", "clippy", "fmt" |
+| `check` | BuildOrchestrator | 6 | "check", "verify", "cargo check" |
+| `run` | ToolOrchestrator | 7 | "run", "execute", "start" |
+| `analyze-project` | ProjectAnalyzer | 6 | "analyze", "explain project" |
+| `add-dependency` | BuildOrchestrator | 4 | "add dep", "cargo add", "npm install" |
+| `update-dependencies` | BuildOrchestrator | 4 | "update", "upgrade" |
+| `clean` | BuildOrchestrator | 3 | "clean", "cargo clean" |
 
-# Via pnpm (if pnpm is configured)
-pnpm run analyze -- . --format pretty
+### Plan Mode
 
-# Directly from the rust directory
-cd rust && cargo run -p project-analyzer -- . --format pretty
+The PlanOrchestrator supports approve/pause/retry/skip flows:
 
-# JSON output (for programmatic use)
-./scripts/analyze.sh /path/to/project --format json
-
-# Skip .gitignore (include all files)
-./scripts/analyze.sh . --no-ignore --format pretty
 ```
-
-Output includes:
-- **Project type** (rust_workspace, node_package, vscode_extension, python_project, etc.)
-- **Languages** with file counts and estimated line counts
-- **Build tools** with config files
-- **Entry points** (main.rs, extension.ts, package.json scripts, etc.)
-- **Directory structure** with classified directories (source_code, documentation, tests, etc.)
-- **Key files** with their roles (changelog, license, CI configs, etc.)
-- **Recursive sub-project analysis** (Cargo workspace members, pnpm workspace packages)
-- **Human-readable summary**
+User: "plan how to fix the build"
+  → PlanOrchestrator creates a plan via LLM
+  → Plan stored as Plan + PlanStep nodes in graph
+  → Plan-list widget pushed to chat
+  → User approves → steps execute sequentially via ToolOrchestrator
+  → Real-time widget updates show progress
+```
 
 ### Debugging
 
@@ -207,4 +220,4 @@ GNU GPLv3 — see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, and check the [issue tracker](https://github.com/naturesense/spire-rust/issues) for open issues.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines, and check the [issue tracker](https://github.com/naturesense/spire-rust/issues) for open issues.

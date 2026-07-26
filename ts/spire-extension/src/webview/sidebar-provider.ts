@@ -98,23 +98,12 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
   <link rel="stylesheet" href="${styleUri}">
 </head>
 <body>
-  <!-- Startup Overlay (visible during initialization) -->
-  <div class="startup-overlay" id="startup-overlay">
-    <div class="startup-card">
-      <div class="startup-spinner-container">
-        <div class="startup-spinner"></div>
-        <div class="startup-logo">Spire</div>
-        <div class="startup-status" id="startup-status">Initializing...</div>
-      </div>
-    </div>
-  </div>
-
   <!-- Tab Navigation Bar -->
   <nav class="tab-bar" id="tab-bar">
     <button class="tab-btn active" data-tab="chat">💬 Chat</button>
     <button class="tab-btn" data-tab="mcp">🔌 MCP</button>
     <button class="tab-btn" data-tab="tools">🛠 Tools</button>
-    <button class="tab-btn" data-tab="agents">🤖 Agents</button>
+    <button class="tab-btn" data-tab="project">📊 Project</button>
   </nav>
 
   <!-- Connection Status -->
@@ -126,9 +115,19 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
   <!-- Error Banner -->
   <div class="error-banner" id="error-banner"></div>
 
-  <!-- ── Tab: Chat ─────────────────────────────────────────────────────── -->
+    <!-- ── Tab: Chat ─────────────────────────────────────────────────────── -->
   <div class="tab-content active" id="tab-chat">
+    <!-- Chat Toolbar -->
+    <div class="tab-toolbar">
+      <span class="tab-toolbar-title">Chat</span>
+      <div style="display:flex;gap:4px">
+        <button class="header-btn" id="clear-btn" title="Clear conversation">🗑 Clear</button>
+        <button class="header-btn" id="settings-btn" title="Settings">⚙️ Settings</button>
+        <button class="header-btn" id="new-chat-btn" title="New chat">✚ New</button>
+      </div>
+    </div>
     <div class="messages" id="messages">
+
       <div class="empty-state" id="empty-state">
         <div class="empty-state-icon">💬</div>
         <div class="empty-state-text">Start a conversation</div>
@@ -153,7 +152,6 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
           autofocus
         ></textarea>
       </div>
-      <button class="settings-btn" id="settings-btn" title="Settings">⚙</button>
       <button class="send-btn" id="send-btn" disabled>Send</button>
     </div>
   </div>
@@ -177,9 +175,8 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
       <div class="config-field">
         <label class="config-label" for="config-model">Model</label>
         <select id="config-model" class="config-input config-select">
-          <option value="deepseek-chat">deepseek-chat</option>
-          <option value="deepseek-coder">deepseek-coder</option>
-          <option value="deepseek-reasoner">deepseek-reasoner</option>
+          <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+          <option value="deepseek-v4-flash">deepseek-v4-flash</option>
         </select>
         <span class="config-hint">The DeepSeek model to use for completions</span>
       </div>
@@ -205,9 +202,7 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
     <div class="tab-toolbar">
       <span class="tab-toolbar-title">MCP Servers</span>
       <div style="display:flex;gap:4px">
-        <button class="header-btn" id="mcp-add-btn" title="Add new MCP server">✚ Add</button>
         <button class="header-btn" id="mcp-refresh-btn" title="Refresh MCP servers">⟳ Refresh</button>
-        <button class="header-btn" id="mcp-import-btn" title="Import MCP config from JSON file">📂 Import</button>
       </div>
     </div>
     <div class="mcp-server-list" id="mcp-server-list">
@@ -215,65 +210,6 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
         <div class="empty-state-icon">🔌</div>
         <div class="empty-state-text">No MCP servers</div>
         <div class="empty-state-hint">MCP servers will appear here when connected</div>
-      </div>
-    </div>
-
-    <!-- ── MCP Config Editor Modal ── -->
-    <div class="modal-overlay hidden" id="mcp-config-modal">
-      <div class="modal-content">
-        <div class="modal-header">
-          <span class="modal-title" id="mcp-config-modal-title">Edit MCP Server</span>
-          <button class="modal-close-btn" id="mcp-config-modal-close">✕</button>
-        </div>
-        <div class="modal-body">
-          <div class="config-field">
-            <label class="config-label">Name *</label>
-            <input class="config-input" id="mcp-config-name" placeholder="e.g. my-filesystem-server" />
-          </div>
-          <div class="config-field">
-            <label class="config-label">Transport Type</label>
-            <select class="config-input config-select" id="mcp-config-transport">
-              <option value="stdio">stdio (command + args)</option>
-              <option value="http">HTTP (URL + headers)</option>
-            </select>
-          </div>
-          <div class="config-field" id="mcp-config-command-group">
-            <label class="config-label">Command</label>
-            <input class="config-input" id="mcp-config-command" placeholder="e.g. npx, uvx, node" />
-          </div>
-          <div class="config-field" id="mcp-config-args-group">
-            <label class="config-label">Arguments (one per line)</label>
-            <textarea class="config-input config-textarea" id="mcp-config-args" rows="3" placeholder="e.g. -y&#10;@modelcontextprotocol/server-filesystem&#10;/path/to/dir"></textarea>
-          </div>
-          <div class="config-field" id="mcp-config-url-group" style="display:none">
-            <label class="config-label">URL</label>
-            <input class="config-input" id="mcp-config-url" placeholder="e.g. http://localhost:3000/mcp" />
-          </div>
-          <div class="config-field" id="mcp-config-headers-group" style="display:none">
-            <label class="config-label">Headers (JSON object)</label>
-            <textarea class="config-input config-textarea" id="mcp-config-headers" rows="2" placeholder='e.g. {"Authorization": "Bearer token"}'></textarea>
-          </div>
-          <div class="config-field">
-            <label class="config-label">Environment Variables (JSON object)</label>
-            <textarea class="config-input config-textarea" id="mcp-config-env" rows="2" placeholder='e.g. {"API_KEY": "value"}'></textarea>
-          </div>
-          <div class="config-field config-checkbox-field">
-            <label class="config-checkbox-label">
-              <input type="checkbox" id="mcp-config-autostart" checked />
-              <span>Auto-start on connection</span>
-            </label>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <div class="modal-footer-left">
-            <button class="header-btn danger-btn hidden" id="mcp-config-delete-btn" title="Delete this MCP server">🗑 Delete</button>
-          </div>
-          <div class="modal-footer-right">
-            <span class="config-status" id="mcp-config-status"></span>
-            <button class="header-btn" id="mcp-config-cancel-btn">Cancel</button>
-            <button class="config-btn config-btn-primary" id="mcp-config-save-btn">Save</button>
-          </div>
-        </div>
       </div>
     </div>
   </div>
@@ -293,12 +229,20 @@ export class ChatSidebarProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 
-  <!-- ── Tab: Agents ───────────────────────────────────────────────────── -->
-  <div class="tab-content" id="tab-agents">
-    <div class="placeholder-tab">
-      <div class="placeholder-icon">🤖</div>
-      <div class="placeholder-text">Agents</div>
-      <div class="placeholder-hint">Not yet implemented</div>
+  <!-- ── Tab: Project (read-only project analysis) ────────────────────── -->
+  <div class="tab-content" id="tab-project">
+    <div class="tab-toolbar">
+      <span class="tab-toolbar-title">Project Analysis</span>
+      <div style="display:flex;gap:4px">
+        <button class="header-btn" id="project-refresh-btn" title="Refresh project analysis">⟳ Refresh</button>
+      </div>
+    </div>
+    <div class="project-content" id="project-content">
+      <div class="empty-state" id="project-empty-state">
+        <div class="empty-state-icon">📊</div>
+        <div class="empty-state-text">Project analysis</div>
+        <div class="empty-state-hint">Loading project overview...</div>
+      </div>
     </div>
   </div>
 

@@ -348,16 +348,9 @@ Relationships must reference existing node UUIDs. Creating a relationship with a
 
 Adding a `DependsOn` edge triggers a DFS cycle check from the target node following outgoing `DependsOn` edges. If the source node is reachable, the operation is rejected with `SchemaError::AcyclicDependencyViolation`.
 
-### 7.4 Bidirectional ID mapping
+### 7.4 UUID-based ID mapping
 
-The actor maintains four `HashMap`s for the UUID ↔ SeleneDB ID mapping:
-
-| Map | Key | Value |
-|-----|-----|-------|
-| `uuid_to_node` | UUID `String` | SeleneDB `NodeId` |
-| `node_to_uuid` | SeleneDB `NodeId` | UUID `String` |
-| `uuid_to_edge` | UUID `String` | SeleneDB `EdgeId` |
-| `edge_to_uuid` | SeleneDB `EdgeId` | UUID `String` |
+The external API uses UUID-based `String` IDs (for compatibility with the TypeScript extension), while SeleneDB uses compact `u64` IDs (`NodeId`/`EdgeId`). The mapping is stored as **properties on the nodes/edges themselves** (the `uuid` property), not in separate HashMap caches. All lookups are performed via GQL queries (e.g., `MATCH (n) WHERE n.uuid = '{uuid}' RETURN n`).
 
 ---
 

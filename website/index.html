@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Spire Rust — Documentation</title>
+<link rel="stylesheet" href="/website/style.css">
+<!-- CDN dependencies -->
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <h1><a href="#" onclick="navigate('home')">Spire Rust</a></h1>
+        <p class="sidebar-subtitle">Documentation</p>
+      </div>
+      <div class="sidebar-search">
+        <input type="text" id="search-input" placeholder="Filter actors..." oninput="filterSidebar(this.value)">
+      </div>
+      <nav id="sidebar-nav">
+        <div class="nav-section">
+          <h3>📋 Actor Catalog</h3>
+          <ul id="actor-list"></ul>
+        </div>
+        <div class="nav-section">
+          <h3> Diagram</h3>
+          <ul>
+            <li><a href="#" onclick="navigate('diagram')">Architecture Diagram</a></li>
+          </ul>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <button id="theme-toggle" onclick="toggleTheme()">☀️ Light</button>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main id="content">
+      <div id="content-inner">
+        <!-- Rendered content goes here -->
+      </div>
+    </main>
+  </div>
+
+  <script src="/website/app.js"></script>
+</body>
+</html>

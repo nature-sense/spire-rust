@@ -1,0 +1,300 @@
+{
+  "intents": [
+    {
+      "name": "build",
+      "description": "Compile and build the project using the detected build system",
+      "handler": "BuildOrchestrator",
+      "action": "build",
+      "priority": 10,
+      "requires_approval": false,
+      "required_capability": "build",
+      "state_requirements": ["project_synced"],
+      "patterns": ["build", "compile", "make", "cargo build", "npm run build", "pnpm build", "yarn build"]
+    },
+    {
+      "name": "test",
+      "description": "Run project tests using the detected test framework",
+      "handler": "BuildOrchestrator",
+      "action": "test",
+      "priority": 8,
+      "requires_approval": false,
+      "required_capability": "test",
+      "state_requirements": ["build_completed"],
+      "patterns": ["test", "run tests", "cargo test", "npm test", "pnpm test", "yarn test", "run unit tests"]
+    },
+    {
+      "name": "lint",
+      "description": "Lint or check code quality using the project's linter",
+      "handler": "BuildOrchestrator",
+      "action": "check",
+      "priority": 5,
+      "requires_approval": false,
+      "required_capability": "check",
+      "state_requirements": ["project_synced"],
+      "patterns": ["lint", "clippy", "eslint", "fmt", "format", "check style", "cargo clippy", "cargo fmt"]
+    },
+    {
+      "name": "fix-build-error",
+      "description": "Diagnose and fix a build failure by analyzing compiler output",
+      "handler": "PlanOrchestrator",
+      "action": "create_plan",
+      "priority": 9,
+      "requires_approval": true,
+      "required_capability": "analyze",
+      "state_requirements": ["build_failed"],
+      "plan_mode": true,
+      "patterns": ["fix build", "fix error", "build failed", "compilation error", "fix compile error"]
+    },
+    {
+      "name": "plan",
+      "description": "Create a step-by-step execution plan for complex tasks",
+      "handler": "PlanOrchestrator",
+      "action": "create_plan",
+      "priority": 8,
+      "requires_approval": false,
+      "required_capability": "analyze",
+      "state_requirements": ["project_synced"],
+      "patterns": ["plan how to", "create a plan", "make a plan for", "what steps to", "plan the", "plan a"]
+    },
+    {
+      "name": "add-dependency",
+      "description": "Add a new dependency to the project",
+      "handler": "BuildOrchestrator",
+      "action": "add-dependency",
+      "priority": 4,
+      "requires_approval": true,
+      "required_capability": "add-dependency",
+      "state_requirements": ["project_synced"],
+      "patterns": ["add dependency", "add crate", "install package", "add dep", "cargo add", "npm install"]
+    },
+    {
+      "name": "analyze-project",
+      "description": "Analyze the project structure, dependencies, and architecture",
+      "handler": "ProjectAnalyzer",
+      "action": "analyze",
+      "priority": 6,
+      "requires_approval": false,
+      "required_capability": "analyze",
+      "state_requirements": ["project_synced"],
+      "patterns": ["analyze", "project structure", "show dependencies", "what's in this project", "explain project"]
+    },
+    {
+      "name": "run",
+      "description": "Run the project or a specific script/target",
+      "handler": "ToolOrchestrator",
+      "action": "run",
+      "priority": 7,
+      "requires_approval": false,
+      "required_capability": "run",
+      "state_requirements": ["build_completed"],
+      "patterns": ["run", "execute", "start", "cargo run", "npm start", "pnpm start", "yarn start"]
+    },
+    {
+      "name": "check",
+      "description": "Quickly check that the project compiles without producing artifacts",
+      "handler": "BuildOrchestrator",
+      "action": "check",
+      "priority": 6,
+      "requires_approval": false,
+      "required_capability": "check",
+      "state_requirements": ["project_synced"],
+      "patterns": ["check", "verify", "cargo check", "type check", "typecheck"]
+    },
+    {
+      "name": "clean",
+      "description": "Clean build artifacts and temporary files",
+      "handler": "BuildOrchestrator",
+      "action": "clean",
+      "priority": 3,
+      "requires_approval": true,
+      "required_capability": "clean",
+      "state_requirements": ["project_synced"],
+      "patterns": ["clean", "cargo clean", "clean build", "remove artifacts"]
+    },
+    {
+      "name": "update-dependencies",
+      "description": "Update project dependencies to their latest compatible versions",
+      "handler": "BuildOrchestrator",
+      "action": "update-dependencies",
+      "priority": 4,
+      "requires_approval": true,
+      "required_capability": "update-dependencies",
+      "state_requirements": ["project_synced"],
+      "patterns": ["update", "upgrade", "cargo update", "npm update", "pnpm update", "yarn upgrade"]
+    }
+  ],
+  "error_types": [
+    {
+      "name": "rustc-compile-error",
+      "description": "Rust compiler error during cargo build — type mismatches, borrow checker, missing items",
+      "severity": "high",
+      "detection_patterns": ["error\\[E\\d{4}\\]", "error: aborting", "error: could not compile"],
+      "common_causes": ["type mismatch", "borrow checker violation", "missing imports or modules", "incorrect trait bounds", "lifetime issues"],
+      "fix_strategies": ["fix-type-error", "fix-borrow-checker", "fix-missing-import"]
+    },
+    {
+      "name": "rustc-warning-as-error",
+      "description": "Rust compiler warning treated as error (deny level)",
+      "severity": "medium",
+      "detection_patterns": ["warning: .*denied", "error: .*deny"],
+      "common_causes": ["unused variables", "dead code", "unreachable patterns", "non-camel-case types"],
+      "fix_strategies": ["fix-warning"]
+    },
+    {
+      "name": "cargo-resolve-error",
+      "description": "Cargo dependency resolution failure",
+      "severity": "high",
+      "detection_patterns": ["error: failed to select", "conflicting dependency", "unable to find", "no matching package"],
+      "common_causes": ["version conflicts", "missing registry entries", "git dependency issues", "feature flag conflicts"],
+      "fix_strategies": ["fix-dependency-conflict"]
+    },
+    {
+      "name": "typescript-compile-error",
+      "description": "TypeScript compilation error",
+      "severity": "high",
+      "detection_patterns": ["TS\\d{4}", "TypeScript error", "error TS"],
+      "common_causes": ["type mismatch", "missing properties on type", "incorrect generic parameters", "module not found"],
+      "fix_strategies": ["fix-type-error", "fix-missing-import"]
+    },
+    {
+      "name": "node-module-not-found",
+      "description": "Node.js module resolution failure",
+      "severity": "high",
+      "detection_patterns": ["Cannot find module", "MODULE_NOT_FOUND", "Error: Cannot find"],
+      "common_causes": ["missing dependency", "incorrect import path", "package not installed", "typo in module name"],
+      "fix_strategies": ["fix-missing-import", "install-dependency"]
+    },
+    {
+      "name": "generic-build-error",
+      "description": "Unclassified build error from any build system",
+      "severity": "medium",
+      "detection_patterns": ["error:", "Error:", "FAILED", "Build FAILED", "exited with code"],
+      "common_causes": ["syntax error", "missing file", "configuration issue", "environment problem"],
+      "fix_strategies": ["generic-fix"]
+    }
+  ],
+  "fix_strategies": [
+    {
+      "name": "fix-type-error",
+      "description": "Fix a type mismatch error by analyzing the error location and suggesting correct types",
+      "category": "fix",
+      "confidence_threshold": 0.6,
+      "execution_steps": ["read_error_context", "analyze_type_mismatch", "apply_fix"],
+      "has_rollback": true
+    },
+    {
+      "name": "fix-borrow-checker",
+      "description": "Fix a Rust borrow checker violation by adjusting lifetimes or ownership patterns",
+      "category": "fix",
+      "confidence_threshold": 0.5,
+      "execution_steps": ["read_error_context", "analyze_borrow_pattern", "apply_fix"],
+      "has_rollback": true
+    },
+    {
+      "name": "fix-missing-import",
+      "description": "Add a missing import or module reference",
+      "category": "fix",
+      "confidence_threshold": 0.7,
+      "execution_steps": ["identify_missing_symbol", "find_correct_module", "add_import_statement"],
+      "has_rollback": true
+    },
+    {
+      "name": "fix-warning",
+      "description": "Fix a compiler warning by removing dead code or adding annotations",
+      "category": "fix",
+      "confidence_threshold": 0.8,
+      "execution_steps": ["read_warning_context", "apply_warning_fix"],
+      "has_rollback": true
+    },
+    {
+      "name": "fix-dependency-conflict",
+      "description": "Resolve a dependency version conflict by updating version requirements",
+      "category": "fix",
+      "confidence_threshold": 0.5,
+      "execution_steps": ["analyze_dependency_tree", "find_compatible_versions", "update_manifests"],
+      "has_rollback": true
+    },
+    {
+      "name": "install-dependency",
+      "description": "Install a missing dependency using the project's package manager",
+      "category": "fix",
+      "confidence_threshold": 0.9,
+      "execution_steps": ["identify_missing_package", "run_install_command"],
+      "has_rollback": false
+    },
+    {
+      "name": "generic-fix",
+      "description": "Generic fallback fix strategy — read error context and attempt a fix",
+      "category": "fix",
+      "confidence_threshold": 0.3,
+      "execution_steps": ["read_error_context", "analyze_error", "apply_fix"],
+      "has_rollback": true
+    }
+  ],
+  "tools": [
+    {
+      "name": "cargo",
+      "description": "Rust package manager and build tool",
+      "category": "build",
+      "capabilities": ["build", "test", "check", "lint", "format", "add_dependency", "update", "clean"]
+    },
+    {
+      "name": "npm",
+      "description": "Node.js package manager",
+      "category": "build",
+      "capabilities": ["build", "test", "install", "add_dependency", "update", "run_script"]
+    },
+    {
+      "name": "pnpm",
+      "description": "Fast Node.js package manager",
+      "category": "build",
+      "capabilities": ["build", "test", "install", "add_dependency", "update", "run_script"]
+    },
+    {
+      "name": "yarn",
+      "description": "Alternative Node.js package manager",
+      "category": "build",
+      "capabilities": ["build", "test", "install", "add_dependency", "upgrade", "run_script"]
+    },
+    {
+      "name": "rustc",
+      "description": "Rust compiler",
+      "category": "compiler",
+      "capabilities": ["compile", "type_check", "lint"]
+    },
+    {
+      "name": "clippy",
+      "description": "Rust linter",
+      "category": "lint",
+      "capabilities": ["lint", "code_quality"]
+    },
+    {
+      "name": "typescript",
+      "description": "TypeScript compiler",
+      "category": "compiler",
+      "capabilities": ["compile", "type_check"]
+    }
+  ],
+  "states": [
+    {
+      "name": "project_synced",
+      "description": "Project structure has been scanned and synced to the graph",
+      "conditions": ["project_root_exists", "graph_initialized"]
+    },
+    {
+      "name": "build_completed",
+      "description": "Last build completed successfully",
+      "conditions": ["build_ran", "exit_code_zero"]
+    },
+    {
+      "name": "build_failed",
+      "description": "Last build failed with errors",
+      "conditions": ["build_ran", "exit_code_nonzero"]
+    },
+    {
+      "name": "fix_applied",
+      "description": "A fix strategy has been applied",
+      "conditions": ["fix_executed"]
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+
 import { spawn, ChildProcess } from 'child_process';
 import * as net from 'net';
 import { createInterface, Interface as ReadlineInterface } from 'readline';
@@ -285,6 +286,11 @@ export class BidirectionalClient {
         reject(new Error(`Request timed out: ${method} (id=${id})`));
       }, this.options.timeout);
 
+      // Log a warning if the timeout is too short for LLM methods
+      if (this.options.timeout < 120_000 && (method.startsWith('llm/') || method.startsWith('chat/'))) {
+        logger.warn(`Timeout of ${this.options.timeout}ms may be too short for method '${method}' (LLM calls can take >60s)`);
+      }
+
       this.pending.set(id, {
         resolve: resolve as (value: unknown) => void,
         reject,
@@ -368,15 +374,23 @@ export class BidirectionalClient {
 
     const id = Number(msg.id);
 
-    // Check if this is an incoming request from the subprocess
-    // (an id we didn't generate — the subprocess uses its own ID namespace)
-    if (!this.pending.has(id)) {
-      // This is an incoming request from the subprocess
+    // Determine if this is an incoming request from the subprocess or a response
+    // to one of our outgoing requests.
+    //
+    // JSON-RPC 2.0 distinction:
+    //   - Request:  has "id" + "method"
+    //   - Response: has "id" + "result" (or "error"), NO "method"
+    //
+    // Both sides (extension and subprocess) use numeric IDs starting from 1,
+    // so we cannot rely on the pending map alone — an incoming request from
+    // the subprocess may share an ID with a pending outgoing request.
+    if (msg.method !== undefined && msg.method !== null) {
+      // Has a method field → this is an incoming request from the subprocess
       this.handleIncomingRequest(id, msg);
       return;
     }
 
-    // It's a response to one of our outgoing requests
+    // No method field → this is a response to one of our outgoing requests
     const pending = this.pending.get(id);
     if (!pending) {
       logger.warn(`Received response for unknown request id=${id}`);

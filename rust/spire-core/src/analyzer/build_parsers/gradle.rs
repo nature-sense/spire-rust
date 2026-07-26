@@ -97,14 +97,17 @@ pub fn parse_gradle(project_root: &Path, build_file: &str) -> Option<BuildMetada
     scripts.push(BuildScript {
         name: "build".to_string(),
         command: "./gradlew build".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "build"}})),
     });
     scripts.push(BuildScript {
         name: "test".to_string(),
         command: "./gradlew test".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "test"}})),
     });
     scripts.push(BuildScript {
         name: "clean".to_string(),
         command: "./gradlew clean".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "clean"}})),
     });
 
     let workspace_members: Vec<WorkspaceMember> = subprojects

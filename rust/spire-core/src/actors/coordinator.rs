@@ -8,8 +8,7 @@
 
 use async_trait::async_trait;
 use regex::Regex;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::actors::Actor;
 use crate::actors::chat::ChatMessage;
@@ -20,8 +19,13 @@ use crate::actors::progress::ProgressMessage;
 use crate::actors::system::SystemMessage;
 use crate::actors::memory_graph::MemoryGraphMessage;
 use crate::actors::project_query::ProjectQueryMessage;
+use crate::actors::intent_router::{IntentRouterMessage, RouteResult};
+use crate::actors::prompt_handler::PromptHandlerMessage;
+use crate::actors::build_orchestrator::BuildOrchestratorMessage;
+use crate::actors::plan_orchestrator::PlanOrchestratorMessage;
+use crate::actors::tool_providers::ToolRouterMessage;
 use crate::models::memory_graph::{McpConfigFile, McpServerConfigEntry};
-use crate::transport::socket::Transport;
+use crate::transport::socket::TransportMessage;
 
 /// Messages for the Coordinator actor.
 pub enum CoordinatorMessage {
@@ -54,11 +58,22 @@ pub struct CoordinatorActor {
     memory_graph_tx: mpsc::Sender<MemoryGraphMessage>,
     /// Sender for the project query actor (semantic project queries).
     project_query_tx: mpsc::Sender<ProjectQueryMessage>,
-    /// Transport for forwarding VSC tool calls to the extension.
-    transport: Arc<Mutex<Transport>>,
+    /// Sender for the intent router actor (routes user queries to matched intents).
+    intent_router_tx: mpsc::Sender<IntentRouterMessage>,
+    /// Sender for the prompt handler actor (LLM prompt lifecycle with context).
+    prompt_handler_tx: mpsc::Sender<PromptHandlerMessage>,
+    /// Sender for the build orchestrator actor (build-fix loop lifecycle).
+    build_orchestrator_tx: mpsc::Sender<BuildOrchestratorMessage>,
+    /// Sender for the tool router actor (routes tool calls to appropriate backend).
+    tool_router_tx: mpsc::Sender<ToolRouterMessage>,
+    /// Sender for the plan orchestrator actor (creates and executes multi-step plans).
+    plan_orchestrator_tx: mpsc::Sender<PlanOrchestratorMessage>,
+    /// Transport sender for forwarding VSC tool calls / notifications to the extension.
+    transport_tx: mpsc::Sender<TransportMessage>,
 }
 
 impl CoordinatorActor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         chat_tx: mpsc::Sender<ChatMessage>,
         tools_tx: mpsc::Sender<ToolsMessage>,
@@ -68,7 +83,12 @@ impl CoordinatorActor {
         system_tx: mpsc::Sender<SystemMessage>,
         memory_graph_tx: mpsc::Sender<MemoryGraphMessage>,
         project_query_tx: mpsc::Sender<ProjectQueryMessage>,
-        transport: Arc<Mutex<Transport>>,
+        intent_router_tx: mpsc::Sender<IntentRouterMessage>,
+        prompt_handler_tx: mpsc::Sender<PromptHandlerMessage>,
+        build_orchestrator_tx: mpsc::Sender<BuildOrchestratorMessage>,
+        tool_router_tx: mpsc::Sender<ToolRouterMessage>,
+        plan_orchestrator_tx: mpsc::Sender<PlanOrchestratorMessage>,
+        transport_tx: mpsc::Sender<TransportMessage>,
     ) -> Self {
         Self {
             chat_tx,
@@ -79,8 +99,39 @@ impl CoordinatorActor {
             system_tx,
             memory_graph_tx,
             project_query_tx,
-            transport,
+            intent_router_tx,
+            prompt_handler_tx,
+            build_orchestrator_tx,
+            tool_router_tx,
+            plan_orchestrator_tx,
+            transport_tx,
         }
+    }
+
+    /// Send a tool event notification to the extension via the transport actor.
+    async fn send_tool_event(&self, event: &str, payload: &serde_json::Value) {
+        let _ = self.transport_tx
+            .send(TransportMessage::SendNotification {
+                method: format!("event/tool/{}", event),
+                params: payload.clone(),
+            })
+            .await;
+    }
+
+    /// Call a VS Code extension tool via the TransportActor.
+    async fn call_extension_tool(&self, tool_name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.transport_tx
+            .send(TransportMessage::CallExtension {
+                method: tool_name.to_string(),
+                params: args.clone(),
+                reply_to: tx,
+            })
+            .await
+            .map_err(|e| format!("Transport send error: {}", e))?;
+
+        rx.await
+            .map_err(|e| format!("Transport response error: {}", e))?
     }
 }
 
@@ -95,6 +146,9 @@ impl Actor for CoordinatorActor {
                 params,
                 response_tx,
             } => {
+                tracing::info!("[COORDINATOR] REQUEST received: method={}, params_keys={:?}",
+                    method,
+                    params.as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()).unwrap_or_default());
                 let result = self.route_request(&method, params).await;
                 let _ = response_tx.send(result);
             }
@@ -107,12 +161,6 @@ impl Actor for CoordinatorActor {
 
 impl CoordinatorActor {
     async fn route_request(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        // Helper to send a tool event notification
-        async fn send_tool_event(transport: &Arc<Mutex<Transport>>, event: &str, payload: &serde_json::Value) {
-            let t = transport.lock().await;
-            let _ = t.send_notification(&format!("event/tool/{}", event), payload).await;
-        }
-
         match method {
             // ── Chat methods ──
             "chat/getActive" => {
@@ -140,11 +188,13 @@ impl CoordinatorActor {
                 let chat_id = params.get("chatId").and_then(|v| v.as_str()).unwrap_or("default");
                 let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 let role = params.get("options").and_then(|o| o.get("role")).and_then(|v| v.as_str()).unwrap_or("assistant");
+                let widget = params.get("options").and_then(|o| o.get("widget")).cloned();
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 if self.chat_tx.send(ChatMessage::Append {
                     chat_id: chat_id.to_string(),
                     content: content.to_string(),
                     role: role.to_string(),
+                    widget,
                     reply_to: tx,
                 }).await.is_err() {
                     return serde_json::json!({"error": "Chat actor not available"});
@@ -203,22 +253,12 @@ impl CoordinatorActor {
                 let tool = params.get("tool").and_then(|v| v.as_str()).unwrap_or("");
                 let args = params.get("args").cloned().unwrap_or(serde_json::Value::Null);
 
-                // Check if this is a VS Code extension tool by looking at the tool name prefix
-                let is_vsc_tool = tool.starts_with("workspace/")
-                    || tool.starts_with("document/")
-                    || tool.starts_with("diagnostics/")
-                    || tool.starts_with("git/")
-                    || tool.starts_with("symbols/");
-
-                // Check if this is a project query tool (memory graph)
-                let is_project_tool = tool.starts_with("project/");
-
                 // Emit tool/start event
                 let tool_call_id = format!("call_direct_{}", std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos())
                     .unwrap_or(0));
-                send_tool_event(&self.transport, "start", &serde_json::json!({
+                self.send_tool_event("start", &serde_json::json!({
                     "tool_name": tool,
                     "args": args,
                     "tool_call_id": tool_call_id,
@@ -226,64 +266,33 @@ impl CoordinatorActor {
                 })).await;
 
                 let start = std::time::Instant::now();
-                let result = if is_vsc_tool {
-                    // Forward the tool call to the VS Code extension via JSON-RPC
-                    // The extension's Router handles these methods locally
-                    let transport = self.transport.lock().await;
-                    match transport.call_extension(tool, &args).await {
-                        Ok(result) => result,
-                        Err(e) => serde_json::json!({"error": format!("VSC tool call failed: {}", e)}),
-                    }
-                } else if is_project_tool {
-                    // Route to ProjectQueryActor
+                let result = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    if self.project_query_tx.send(ProjectQueryMessage::CallTool {
-                        tool: tool.to_string(),
+                    if self.tool_router_tx.send(ToolRouterMessage::CallTool {
+                        tool_name: tool.to_string(),
                         args: args.clone(),
                         reply_to: tx,
                     }).await.is_err() {
-                        serde_json::json!({"error": "ProjectQuery actor not available"})
+                        serde_json::json!({"error": "ToolRouter actor not available"})
                     } else {
                         match rx.await {
-                            Ok(result) => result,
-                            Err(_) => serde_json::json!({"error": "ProjectQuery actor response error"}),
-                        }
-                    }
-                } else {
-                    // External MCP tool — route through the MCP client actor
-                    let server_name = params.get("serverName")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let arguments = args.as_object().cloned();
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    if self.mcp_client_tx.send(McpClientMessage::CallTool {
-                        server_name,
-                        tool_name: tool.to_string(),
-                        arguments,
-                        reply_to: tx,
-                    }).await.is_err() {
-                        serde_json::json!({"error": "MCP client actor not available"})
-                    } else {
-                        match rx.await {
-                            Ok(Ok(result)) => serde_json::to_value(result).unwrap_or(serde_json::json!({"error": "serialization error"})),
-                            Ok(Err(e)) => serde_json::json!({"error": e.to_string()}),
-                            Err(_) => serde_json::json!({"error": "MCP client actor response error"}),
+                            Ok(Ok(res)) => res,
+                            Ok(Err(e)) => serde_json::json!({"error": e}),
+                            Err(_) => serde_json::json!({"error": "ToolRouter actor response error"}),
                         }
                     }
                 };
                 let duration_ms = start.elapsed().as_millis() as u64;
 
-                // Emit tool/result or tool/error event
                 if result.get("error").is_some() {
-                    send_tool_event(&self.transport, "error", &serde_json::json!({
+                    self.send_tool_event("error", &serde_json::json!({
                         "tool_name": tool,
                         "error": result["error"],
                         "duration_ms": duration_ms,
                         "tool_call_id": tool_call_id,
                     })).await;
                 } else {
-                    send_tool_event(&self.transport, "result", &serde_json::json!({
+                    self.send_tool_event("result", &serde_json::json!({
                         "tool_name": tool,
                         "result": result,
                         "duration_ms": duration_ms,
@@ -307,7 +316,6 @@ impl CoordinatorActor {
             }
 
             "mcp/loadConfig" => {
-                // Load MCP config from the graph database (not from file)
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 if self.memory_graph_tx.send(MemoryGraphMessage::GetMcpConfig { reply_to: tx }).await.is_err() {
                     return serde_json::json!({"error": "Memory graph actor not available"});
@@ -315,7 +323,6 @@ impl CoordinatorActor {
                 match rx.await {
                     Ok(Ok(servers)) => {
                         let count = servers.len();
-                        // Convert and send to MCP client
                         let configs: Vec<crate::mcp::client::McpServerConfig> = servers
                             .into_iter()
                             .filter_map(|entry| {
@@ -463,47 +470,192 @@ impl CoordinatorActor {
 
             // ── LLM methods ──
             "llm/complete" => {
-                let prompt = params.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                tracing::info!("[COORDINATOR] llm/complete called");
+                // Extract the prompt (either explicit `prompt` param, or the last user message from `messages`)
+                let mut prompt = params.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let prompt_source;
+                if prompt.is_empty() {
+                    // Fallback: extract the last user message from the messages array
+                    prompt_source = "messages fallback";
+                    if let Some(messages) = params.get("messages").and_then(|v| v.as_array()) {
+                        for msg in messages.iter().rev() {
+                            if msg.get("role").and_then(|r| r.as_str()) == Some("user") {
+                                if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                                    prompt = content.to_string();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    prompt_source = "explicit prompt param";
+                }
+                tracing::info!("[COORDINATOR] PROMPT extracted (source={}): \"{}\"", prompt_source, &prompt.chars().take(200).collect::<String>());
 
-                // 1. Fetch the active chat dialog to get message history
+                // Step 0: Route through the IntentRouterActor to determine the handler.
+                tracing::info!("[COORDINATOR] → INTENT_ROUTER: sending RouteQuery (query=\"{}\")", &prompt.chars().take(100).collect::<String>());
+                let (intent_tx, intent_rx) = tokio::sync::oneshot::channel();
+                if self.intent_router_tx
+                    .send(IntentRouterMessage::RouteQuery {
+                        query: prompt.to_string(),
+                        reply_to: intent_tx,
+                    })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("[COORDINATOR] IntentRouterActor not available, falling through to LLM");
+                } else if let Ok(route_result) = intent_rx.await {
+                    tracing::info!("[COORDINATOR] ← INTENT RESULT: {:?}", route_result);
+                    match route_result {
+                        RouteResult::Build { intent_name, confidence, ref parameters } => {
+                            tracing::info!("[COORDINATOR] INTENT → project/build (intent={}, confidence={}, parameters={:?})", intent_name, confidence, parameters);
+
+                            // Extract scope from the query parameter to pass to the meta build tool
+                            let query = parameters.get("query").map(|s| s.as_str()).unwrap_or("");
+                            let scope = if query.eq_ignore_ascii_case("build all") || query.eq_ignore_ascii_case("build") || query.is_empty() {
+                                None // defaults to "all" in project/build
+                            } else if query.starts_with("build ") {
+                                Some(query[6..].to_string()) // extract scope after "build "
+                            } else {
+                                None
+                            };
+
+                            let mut build_args = serde_json::Map::new();
+                            if let Some(ref s) = scope {
+                                build_args.insert("scope".to_string(), serde_json::Value::String(s.clone()));
+                            }
+                            if let Some(mode) = parameters.get("mode").map(|s| s.as_str()) {
+                                build_args.insert("mode".to_string(), serde_json::Value::String(mode.to_string()));
+                            }
+
+                            tracing::info!("[COORDINATOR] → TOOL_ROUTER: project/build (scope={:?}, args={:?})", scope, build_args);
+                            let (build_tx, build_rx) = tokio::sync::oneshot::channel();
+                            match self.tool_router_tx
+                                .send(ToolRouterMessage::CallTool {
+                                    tool_name: "project/build".to_string(),
+                                    args: serde_json::Value::Object(build_args),
+                                    reply_to: build_tx,
+                                })
+                                .await
+                            {
+                                Ok(()) => {
+                                    tracing::info!("[COORDINATOR] ← TOOL_ROUTER: waiting for build result");
+                                    return match build_rx.await {
+                                        Ok(Ok(result)) => {
+                                            // Format build result as a concise text summary instead of raw JSON.
+                                            // The detailed build info is already shown via the build-list widget.
+                                            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+                                            let duration = result.get("duration_secs").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                            let systems = result.get("systems").and_then(|v| v.as_array());
+                                            let count = systems.map(|a| a.len()).unwrap_or(0);
+                                            let summary = if success {
+                                                format!("✅ Build completed successfully — {} system(s) in {:.1}s", count, duration)
+                                            } else {
+                                                format!("⚠️ Build finished with failures — see build list above for details")
+                                            };
+                                            serde_json::json!({"content": summary})
+                                        }
+                                        Ok(Err(e)) => serde_json::json!({"error": format!("Build failed: {}", e)}),
+                                        Err(e) => serde_json::json!({"error": format!("Build tool response error: {}", e)}),
+                                    };
+                                }
+                                Err(e) => {
+                                    return serde_json::json!({"error": format!("ToolRouter not available: {}", e)});
+                                }
+                            }
+                        }
+                        RouteResult::StateBlocked { intent_name, confidence, ref missing_states } => {
+                            let missing = missing_states.join(", ");
+                            tracing::info!("[COORDINATOR] ← INTENT: StateBlocked (intent={}, confidence={}, missing=[{}]) — returning blocked message", intent_name, confidence, missing);
+                            return serde_json::json!({
+                                "content": format!("⚠️ Cannot run **{}** — required state not ready: **{}**\n\nTry running a project sync first.", intent_name, missing)
+                            });
+                        }
+                        RouteResult::NeedsApproval { intent_name, confidence } => {
+                            tracing::info!("[COORDINATOR] ← INTENT: NeedsApproval (intent={}, confidence={}) — falling to prompt handler", intent_name, confidence);
+                        }
+                        RouteResult::Plan { intent_name, confidence, ref parameters } => {
+                            tracing::info!("[COORDINATOR] ← INTENT: Plan (intent={}, confidence={}, params={:?}) — dispatching to PlanOrchestrator", intent_name, confidence, parameters);
+                            let goal = parameters.get("query").cloned()
+                                .unwrap_or_else(|| params.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string());
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            if self.plan_orchestrator_tx
+                                .send(PlanOrchestratorMessage::CreatePlan {
+                                    goal: goal.clone(),
+                                    intent_name: Some(intent_name.clone()),
+                                    parameters: parameters.clone(),
+                                    reply_to: tx,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                return serde_json::json!({"error": "PlanOrchestrator not available"});
+                            }
+                            match rx.await {
+                                Ok(Ok(plan)) => {
+                                    return serde_json::json!({
+                                        "content": format!("📋 **Plan created:** {} — {} steps. Review and approve to begin.", plan.goal, plan.total_steps)
+                                    });
+                                }
+                                Ok(Err(e)) => {
+                                    return serde_json::json!({"error": format!("Plan creation failed: {}", e)});
+                                }
+                                Err(e) => {
+                                    return serde_json::json!({"error": format!("PlanOrchestrator response error: {}", e)});
+                                }
+                            }
+                        }
+                        RouteResult::Chat => {
+                            tracing::info!("[COORDINATOR] ← INTENT: Chat — proceeding to LLM fall-through");
+                        }
+                        _ => {
+                            tracing::info!("[COORDINATOR] ← INTENT: unmatched RouteResult variant — falling through to LLM");
+                        }
+                    }
+                }
+
+                // ── Fall through LLM flow ──
+                tracing::info!("[COORDINATOR] FALL-THROUGH LLM: gathering chat history and tools");
                 let chat_history = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     if self.chat_tx.send(ChatMessage::GetActive { reply_to: tx }).await.is_err() {
+                        tracing::warn!("[COORDINATOR] Chat actor not available for history");
                         None
                     } else {
-                        rx.await.ok().flatten()
+                        let hist = rx.await.ok().flatten();
+                        tracing::info!("[COORDINATOR] Chat history: {} has {} messages", 
+                            hist.as_ref().map(|d| d.id.as_str()).unwrap_or("none"),
+                            hist.as_ref().map(|d| d.messages.len()).unwrap_or(0));
+                        hist
                     }
                 };
 
-                // 2. Fetch registered tools
                 let tools = {
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     if self.tools_tx.send(ToolsMessage::ListTools { reply_to: tx }).await.is_err() {
+                        tracing::warn!("[COORDINATOR] Tools actor not available");
                         vec![]
                     } else {
-                        rx.await.unwrap_or_default()
+                        let t = rx.await.unwrap_or_default();
+                        tracing::info!("[COORDINATOR] Tools loaded: {} tools available", t.len());
+                        if !t.is_empty() {
+                            tracing::info!("[COORDINATOR] Tool names: {:?}", t.iter().map(|ti| &ti.name).collect::<Vec<_>>());
+                        }
+                        t
                     }
                 };
 
-                // 3. Build a system message — tools are sent via the native
-                //    OpenAI `tools` array (see CompleteWithTools below), so we
-                //    keep the system prompt minimal to avoid confusing the LLM
-                //    with redundant text descriptions that conflict with the
-                //    structured tool definitions.
                 let system_msg = "You are a helpful AI assistant. When you need to use a tool, respond using the native function-calling mechanism (tool_calls) provided by the API — do not describe tool calls in plain text.".to_string();
 
-                // 4. Build the full messages array
                 let mut messages: Vec<crate::actors::chat::ChatMessageData> = Vec::new();
-
-                // System message with tool descriptions
                 messages.push(crate::actors::chat::ChatMessageData {
                     id: "sys-tools".to_string(),
                     role: "system".to_string(),
                     content: system_msg,
                     timestamp: chrono::Utc::now().to_rfc3339(),
+                    widget: None,
                 });
 
-                // Chat history (skip system messages from history to avoid duplication)
                 if let Some(ref dialog) = chat_history {
                     for msg in &dialog.messages {
                         if msg.role != "system" {
@@ -512,7 +664,6 @@ impl CoordinatorActor {
                     }
                 }
 
-                // Ensure the last message is the current user prompt
                 let has_user_prompt = messages.last()
                     .map(|m| m.role == "user" && m.content == prompt)
                     .unwrap_or(false);
@@ -523,13 +674,16 @@ impl CoordinatorActor {
                         role: "user".to_string(),
                         content: prompt.to_string(),
                         timestamp: chrono::Utc::now().to_rfc3339(),
+                        widget: None,
                     });
                 }
 
-                tracing::info!("Coordinator: llm/complete with {} messages and {} tools described",
-                    messages.len(), tools.len());
+                tracing::info!("[COORDINATOR] FALL-THROUGH: built messages array with {} msgs (has_user_prompt={}), {} tools",
+                    messages.len(), has_user_prompt, tools.len());
+                for (i, m) in messages.iter().enumerate() {
+                    tracing::info!("[COORDINATOR]   message[{}]: role={}, id={}, content_len={}", i, m.role, m.id, m.content.len());
+                }
 
-                // 5. Send to LLM with tool definitions (OpenAI-compatible tools array)
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 if self.llm_tx.send(LlmMessage::CompleteWithTools {
                     messages: messages.clone(),
@@ -545,14 +699,13 @@ impl CoordinatorActor {
                     Err(_) => return serde_json::json!({"error": "LLM actor response error"}),
                 };
 
-                // 6. Check if the response contains tool_calls (JSON format)
-                // The response is either plain text or a JSON string with tool_calls
+                tracing::info!("[COORDINATOR] ← LLM first response received (len={} chars)", llm_response.len());
                 let final_content = if let Ok(json_msg) = serde_json::from_str::<serde_json::Value>(&llm_response) {
+                    let has_tc = json_msg.get("tool_calls").and_then(|t| t.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+                    tracing::info!("[COORDINATOR] LLM response parsed as JSON, has_tool_calls={}", has_tc);
                     if let Some(tool_calls) = json_msg["tool_calls"].as_array() {
                         if !tool_calls.is_empty() {
-                            // Execute each tool call and collect results
                             let mut tool_results: Vec<serde_json::Value> = Vec::new();
-
                             for tc in tool_calls {
                                 let function_name = tc["function"]["name"].as_str().unwrap_or("unknown");
                                 let function_args: serde_json::Value = tc["function"]["arguments"]
@@ -560,254 +713,138 @@ impl CoordinatorActor {
                                     .and_then(|s| serde_json::from_str(s).ok())
                                     .unwrap_or(serde_json::Value::Null);
                                 let tool_call_id = tc["id"].as_str().unwrap_or("call_unknown");
-
                                 tracing::info!("Coordinator: executing tool call: {} with args: {:?}", function_name, function_args);
-
-                                // Emit tool/start event
-                                send_tool_event(&self.transport, "start", &serde_json::json!({
-                                    "tool_name": function_name,
-                                    "args": function_args,
-                                    "tool_call_id": tool_call_id,
-                                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                                self.send_tool_event("start", &serde_json::json!({
+                                    "tool_name": function_name, "args": function_args, "tool_call_id": tool_call_id, "timestamp": chrono::Utc::now().to_rfc3339(),
                                 })).await;
-
                                 let is_vsc_tool = function_name.starts_with("workspace/")
                                     || function_name.starts_with("document/")
                                     || function_name.starts_with("diagnostics/")
                                     || function_name.starts_with("git/")
                                     || function_name.starts_with("symbols/");
                                 let is_project_tool = function_name.starts_with("project/");
-
                                 let tool_start = std::time::Instant::now();
                                 let tool_result: Result<serde_json::Value, String> = if is_vsc_tool {
-                                    // Forward to VS Code extension
-                                    let transport = self.transport.lock().await;
-                                    transport.call_extension(function_name, &function_args).await
+                                    self.call_extension_tool(function_name, &function_args).await
                                 } else if is_project_tool {
-                                    // Route to ProjectQueryActor
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     if self.project_query_tx.send(ProjectQueryMessage::CallTool {
-                                        tool: function_name.to_string(),
-                                        args: function_args.clone(),
-                                        reply_to: tx,
+                                        tool: function_name.to_string(), args: function_args.clone(), reply_to: tx,
                                     }).await.is_ok() {
-                                        match rx.await {
-                                            Ok(result) => Ok(result),
-                                            Err(e) => Err(format!("ProjectQuery actor response error: {}", e)),
-                                        }
-                                    } else {
-                                        Err("ProjectQuery actor not available".to_string())
-                                    }
+                                        match rx.await { Ok(result) => Ok(result), Err(e) => Err(format!("ProjectQuery actor response error: {}", e)), }
+                                    } else { Err("ProjectQuery actor not available".to_string()) }
                                 } else {
-                                    // Try MCP client
                                     let (tool_tx, tool_rx) = tokio::sync::oneshot::channel();
                                     if self.mcp_client_tx.send(McpClientMessage::CallTool {
-                                        server_name: String::new(),
-                                        tool_name: function_name.to_string(),
-                                        arguments: function_args.as_object().cloned(),
-                                        reply_to: tool_tx,
+                                        server_name: String::new(), tool_name: function_name.to_string(),
+                                        arguments: function_args.as_object().cloned(), reply_to: tool_tx,
                                     }).await.is_ok() {
                                         match tool_rx.await {
                                             Ok(Ok(result)) => Ok(serde_json::to_value(result).unwrap_or(serde_json::json!({"error": "serialization error"}))),
                                             Ok(Err(e)) => Err(e.to_string()),
                                             Err(_) => Err("MCP client response error".to_string()),
                                         }
-                                    } else {
-                                        Err("MCP client not available".to_string())
-                                    }
+                                    } else { Err("MCP client not available".to_string()) }
                                 };
                                 let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
-
                                 match &tool_result {
                                     Ok(result) => {
-                                        // Emit tool/result event
-                                        send_tool_event(&self.transport, "result", &serde_json::json!({
-                                            "tool_name": function_name,
-                                            "result": result,
-                                            "duration_ms": tool_duration_ms,
-                                            "tool_call_id": tool_call_id,
+                                        self.send_tool_event("result", &serde_json::json!({
+                                            "tool_name": function_name, "result": result, "duration_ms": tool_duration_ms, "tool_call_id": tool_call_id,
                                         })).await;
-                                        tool_results.push(serde_json::json!({
-                                            "tool_call_id": tool_call_id,
-                                            "tool_name": function_name,
-                                            "result": result,
-                                        }));
+                                        tool_results.push(serde_json::json!({"tool_call_id": tool_call_id, "tool_name": function_name, "result": result}));
                                     }
                                     Err(e) => {
-                                        // Emit tool/error event
-                                        send_tool_event(&self.transport, "error", &serde_json::json!({
-                                            "tool_name": function_name,
-                                            "error": e,
-                                            "duration_ms": tool_duration_ms,
-                                            "tool_call_id": tool_call_id,
+                                        self.send_tool_event("error", &serde_json::json!({
+                                            "tool_name": function_name, "error": e, "duration_ms": tool_duration_ms, "tool_call_id": tool_call_id,
                                         })).await;
-                                        tool_results.push(serde_json::json!({
-                                            "tool_call_id": tool_call_id,
-                                            "tool_name": function_name,
-                                            "error": e.to_string(),
-                                        }));
+                                        tool_results.push(serde_json::json!({"tool_call_id": tool_call_id, "tool_name": function_name, "error": e.to_string()}));
                                     }
                                 }
                             }
-
-                            // Append tool results as a new user message and get final response
-                            let tool_results_text = serde_json::to_string_pretty(&tool_results)
-                                .unwrap_or_else(|_| "[]".to_string());
-
+                            let tool_results_text = serde_json::to_string_pretty(&tool_results).unwrap_or_else(|_| "[]".to_string());
                             messages.push(crate::actors::chat::ChatMessageData {
-                                id: "tool-results".to_string(),
-                                role: "user".to_string(),
+                                id: "tool-results".to_string(), role: "user".to_string(),
                                 content: format!("Tool execution results:\n{}", tool_results_text),
-                                timestamp: chrono::Utc::now().to_rfc3339(),
+                                timestamp: chrono::Utc::now().to_rfc3339(), widget: None,
                             });
-
-                            // Send follow-up request to LLM with tool results
                             let (tx2, rx2) = tokio::sync::oneshot::channel();
-                            if self.llm_tx.send(LlmMessage::CompleteWithMessages {
-                                messages,
-                                reply_to: tx2,
-                            }).await.is_err() {
+                            if self.llm_tx.send(LlmMessage::CompleteWithMessages { messages, reply_to: tx2 }).await.is_err() {
                                 return serde_json::json!({"error": "LLM actor not available", "tool_results": tool_results});
                             }
-
                             match rx2.await {
                                 Ok(Ok(content)) => content,
                                 Ok(Err(e)) => return serde_json::json!({"error": e.to_string(), "tool_results": tool_results}),
                                 Err(_) => return serde_json::json!({"error": "LLM actor response error", "tool_results": tool_results}),
                             }
-                        } else {
-                            llm_response
-                        }
+                        } else { llm_response }
                     } else {
-                        // JSON but no tool_calls — check for content field
                         json_msg["content"].as_str().unwrap_or(&llm_response).to_string()
                     }
                 } else {
-                    // Plain text response — check for XML/Claude-format tool calls
-                    // as a defensive fallback (the LLM actor should have already
-                    // parsed these, but this catches edge cases from follow-up calls)
+                    tracing::info!("[COORDINATOR] LLM response is NOT valid JSON, checking for XML tool calls");
                     if let Some(xml_tool_calls) = Self::parse_xml_tool_calls(&llm_response) {
-                        tracing::info!(
-                            "Coordinator: detected {} XML-format tool call(s) in plain text response, executing",
-                            xml_tool_calls.len()
-                        );
-                        // Execute each tool call and collect results
+                        tracing::info!("[COORDINATOR] XML PARSE: detected {} XML-format tool call(s)", xml_tool_calls.len());
                         let mut tool_results: Vec<serde_json::Value> = Vec::new();
-
                         for tc in &xml_tool_calls {
                             let function_name = tc["function"]["name"].as_str().unwrap_or("unknown");
                             let function_args: serde_json::Value = tc["function"]["arguments"]
-                                .as_str()
-                                .and_then(|s| serde_json::from_str(s).ok())
-                                .unwrap_or(serde_json::Value::Null);
+                                .as_str().and_then(|s| serde_json::from_str(s).ok()).unwrap_or(serde_json::Value::Null);
                             let tool_call_id = tc["id"].as_str().unwrap_or("call_xml_unknown");
-
-                            tracing::info!("Coordinator: executing XML tool call: {} with args: {:?}", function_name, function_args);
-
-                            // Emit tool/start event
-                            send_tool_event(&self.transport, "start", &serde_json::json!({
-                                "tool_name": function_name,
-                                "args": function_args,
-                                "tool_call_id": tool_call_id,
-                                "timestamp": chrono::Utc::now().to_rfc3339(),
+                            self.send_tool_event("start", &serde_json::json!({
+                                "tool_name": function_name, "args": function_args, "tool_call_id": tool_call_id, "timestamp": chrono::Utc::now().to_rfc3339(),
                             })).await;
-
                             let is_vsc_tool = function_name.starts_with("workspace/")
                                 || function_name.starts_with("document/")
                                 || function_name.starts_with("diagnostics/")
                                 || function_name.starts_with("git/")
                                 || function_name.starts_with("symbols/");
                             let is_project_tool = function_name.starts_with("project/");
-
                             let tool_start = std::time::Instant::now();
                             let tool_result: Result<serde_json::Value, String> = if is_vsc_tool {
-                                let transport = self.transport.lock().await;
-                                transport.call_extension(function_name, &function_args).await
+                                self.call_extension_tool(function_name, &function_args).await
                             } else if is_project_tool {
                                 let (tx, rx) = tokio::sync::oneshot::channel();
                                 if self.project_query_tx.send(ProjectQueryMessage::CallTool {
-                                    tool: function_name.to_string(),
-                                    args: function_args.clone(),
-                                    reply_to: tx,
+                                    tool: function_name.to_string(), args: function_args.clone(), reply_to: tx,
                                 }).await.is_ok() {
-                                    match rx.await {
-                                        Ok(result) => Ok(result),
-                                        Err(e) => Err(format!("ProjectQuery actor response error: {}", e)),
-                                    }
-                                } else {
-                                    Err("ProjectQuery actor not available".to_string())
-                                }
+                                    match rx.await { Ok(result) => Ok(result), Err(e) => Err(format!("ProjectQuery actor response error: {}", e)), }
+                                } else { Err("ProjectQuery actor not available".to_string()) }
                             } else {
                                 let (tool_tx, tool_rx) = tokio::sync::oneshot::channel();
                                 if self.mcp_client_tx.send(McpClientMessage::CallTool {
-                                    server_name: String::new(),
-                                    tool_name: function_name.to_string(),
-                                    arguments: function_args.as_object().cloned(),
-                                    reply_to: tool_tx,
+                                    server_name: String::new(), tool_name: function_name.to_string(),
+                                    arguments: function_args.as_object().cloned(), reply_to: tool_tx,
                                 }).await.is_ok() {
                                     match tool_rx.await {
                                         Ok(Ok(result)) => Ok(serde_json::to_value(result).unwrap_or(serde_json::json!({"error": "serialization error"}))),
                                         Ok(Err(e)) => Err(e.to_string()),
                                         Err(_) => Err("MCP client response error".to_string()),
                                     }
-                                } else {
-                                    Err("MCP client not available".to_string())
-                                }
+                                } else { Err("MCP client not available".to_string()) }
                             };
                             let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
-
                             match &tool_result {
                                 Ok(result) => {
-                                    // Emit tool/result event
-                                    send_tool_event(&self.transport, "result", &serde_json::json!({
-                                        "tool_name": function_name,
-                                        "result": result,
-                                        "duration_ms": tool_duration_ms,
-                                        "tool_call_id": tool_call_id,
-                                    })).await;
-                                    tool_results.push(serde_json::json!({
-                                        "tool_call_id": tool_call_id,
-                                        "tool_name": function_name,
-                                        "result": result,
-                                    }));
+                                    self.send_tool_event("result", &serde_json::json!({ "tool_name": function_name, "result": result, "duration_ms": tool_duration_ms, "tool_call_id": tool_call_id, })).await;
+                                    tool_results.push(serde_json::json!({"tool_call_id": tool_call_id, "tool_name": function_name, "result": result}));
                                 }
                                 Err(e) => {
-                                    // Emit tool/error event
-                                    send_tool_event(&self.transport, "error", &serde_json::json!({
-                                        "tool_name": function_name,
-                                        "error": e,
-                                        "duration_ms": tool_duration_ms,
-                                        "tool_call_id": tool_call_id,
-                                    })).await;
-                                    tool_results.push(serde_json::json!({
-                                        "tool_call_id": tool_call_id,
-                                        "tool_name": function_name,
-                                        "error": e.to_string(),
-                                    }));
+                                    self.send_tool_event("error", &serde_json::json!({ "tool_name": function_name, "error": e, "duration_ms": tool_duration_ms, "tool_call_id": tool_call_id, })).await;
+                                    tool_results.push(serde_json::json!({"tool_call_id": tool_call_id, "tool_name": function_name, "error": e.to_string()}));
                                 }
                             }
                         }
-
-                        // Append tool results as a new user message and get final response
-                        let tool_results_text = serde_json::to_string_pretty(&tool_results)
-                            .unwrap_or_else(|_| "[]".to_string());
-
+                        let tool_results_text = serde_json::to_string_pretty(&tool_results).unwrap_or_else(|_| "[]".to_string());
                         messages.push(crate::actors::chat::ChatMessageData {
-                            id: "tool-results".to_string(),
-                            role: "user".to_string(),
+                            id: "tool-results".to_string(), role: "user".to_string(),
                             content: format!("Tool execution results:\n{}", tool_results_text),
-                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            timestamp: chrono::Utc::now().to_rfc3339(), widget: None,
                         });
-
-                        // Send follow-up request to LLM with tool results
                         let (tx2, rx2) = tokio::sync::oneshot::channel();
-                        if self.llm_tx.send(LlmMessage::CompleteWithMessages {
-                            messages,
-                            reply_to: tx2,
-                        }).await.is_err() {
+                        if self.llm_tx.send(LlmMessage::CompleteWithMessages { messages, reply_to: tx2 }).await.is_err() {
                             return serde_json::json!({"error": "LLM actor not available", "tool_results": tool_results});
                         }
-
                         match rx2.await {
                             Ok(Ok(content)) => content,
                             Ok(Err(e)) => return serde_json::json!({"error": e.to_string(), "tool_results": tool_results}),
@@ -831,7 +868,6 @@ impl CoordinatorActor {
                 }
                 match rx.await {
                     Ok(Ok(mut chunk_rx)) => {
-                        // Collect all chunks into a single response
                         let mut full = String::new();
                         while let Some(chunk) = chunk_rx.recv().await {
                             full.push_str(&chunk);
@@ -844,7 +880,7 @@ impl CoordinatorActor {
             }
             "llm/updateConfig" => {
                 let api_key = params.get("apiKey").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let model = params.get("model").and_then(|v| v.as_str()).unwrap_or("deepseek-chat").to_string();
+                let model = params.get("model").and_then(|v| v.as_str()).unwrap_or(&crate::actors::LlmConfig::default().model).to_string();
                 let api_url = params.get("apiUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let max_tokens = params.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(4096) as u32;
                 let temperature = params.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.7) as f32;
@@ -926,7 +962,6 @@ impl CoordinatorActor {
                 }
             }
             "config/getAll" => {
-                // Fetch all deepseek config keys in one call
                 let keys = ["deepseek.api_key", "deepseek.model", "deepseek.api_url"];
                 let mut result = serde_json::Map::new();
                 for key in &keys {
@@ -964,17 +999,13 @@ impl CoordinatorActor {
                     return serde_json::json!({"error": "Failed to store config"});
                 }
 
-                // Write a snapshot after config/set to persist the change immediately
                 {
                     let (tx_sync, rx_sync) = tokio::sync::oneshot::channel();
                     let _ = self.memory_graph_tx.send(MemoryGraphMessage::Sync { reply_to: tx_sync }).await;
                     let _ = rx_sync.await;
                 }
 
-                // If this is a deepseek config key, also update the LLM actor at runtime
-
                 if key.starts_with("deepseek.") {
-                    // Fetch all deepseek config values to build a complete LlmConfig
                     let (tx_key, rx_key) = tokio::sync::oneshot::channel();
                     let _ = self.memory_graph_tx.send(MemoryGraphMessage::GetConfig {
                         key: "deepseek.api_key".to_string(),
@@ -991,7 +1022,7 @@ impl CoordinatorActor {
                     }).await;
                     let model = rx_model.await.ok().and_then(|r| r.ok()).flatten()
                         .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "deepseek-chat".to_string());
+                        .unwrap_or_else(|| crate::actors::LlmConfig::default().model);
 
                     let (tx_url, rx_url) = tokio::sync::oneshot::channel();
                     let _ = self.memory_graph_tx.send(MemoryGraphMessage::GetConfig {
@@ -1049,10 +1080,7 @@ impl CoordinatorActor {
                 }
             }
             "mcp/config/import" => {
-                // Accept the config object directly (from extension which already parsed the file)
-                // or fall back to a file path for backward compatibility.
                 let servers: Vec<McpServerConfigEntry> = if let Some(config_val) = params.get("config") {
-                    // Parse the config object: { servers: [...] }
                     match serde_json::from_value::<McpConfigFile>(config_val.clone()) {
                         Ok(cfg) => cfg.servers,
                         Err(e) => {
@@ -1063,7 +1091,6 @@ impl CoordinatorActor {
                     if config_path.is_empty() {
                         return serde_json::json!({"error": "Missing 'path' parameter"});
                     }
-                    // Read and parse the JSON file
                     let content = match std::fs::read_to_string(config_path) {
                         Ok(c) => c,
                         Err(e) => return serde_json::json!({"error": format!("Failed to read config file: {}", e)}),
@@ -1076,8 +1103,6 @@ impl CoordinatorActor {
                     return serde_json::json!({"error": "Missing 'config' or 'path' parameter"});
                 };
 
-                // ── Delete stale servers not in the new import ──
-                // First, fetch all existing servers from the graph
                 let (get_tx, get_rx) = tokio::sync::oneshot::channel();
                 if self.memory_graph_tx.send(MemoryGraphMessage::GetMcpConfig { reply_to: get_tx }).await.is_err() {
                     return serde_json::json!({"error": "MemoryGraph actor not available"});
@@ -1088,17 +1113,16 @@ impl CoordinatorActor {
                     Err(_) => return serde_json::json!({"error": "MemoryGraph actor response error"}),
                 };
 
-                // Build a set of imported server names for quick lookup
                 let imported_names: std::collections::HashSet<&str> =
                     servers.iter().map(|s| s.name.as_str()).collect();
 
-                // Delete any existing server whose name is NOT in the new import
                 for existing in &existing_servers {
                     if !imported_names.contains(existing.name.as_str()) {
                         tracing::info!("Coordinator: removing stale MCP server '{}' from import", existing.name);
                         let (del_tx, del_rx) = tokio::sync::oneshot::channel();
-                        if self.memory_graph_tx.send(MemoryGraphMessage::DeleteMcpConfig {
-                            name: existing.name.clone(),
+                        if self.memory_graph_tx.send(MemoryGraphMessage::SetConfig {
+                            key: format!("mcp.server.{}", existing.name),
+                            value: serde_json::Value::Null,
                             reply_to: del_tx,
                         }).await.is_err() {
                             return serde_json::json!({"error": "MemoryGraph actor not available"});
@@ -1109,11 +1133,12 @@ impl CoordinatorActor {
                     }
                 }
 
-                // Store each server in the graph (replacing existing)
                 for server in &servers {
+                    let entry_json = serde_json::to_value(server).unwrap_or(serde_json::Value::Null);
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    if self.memory_graph_tx.send(MemoryGraphMessage::SaveMcpConfig {
-                        entry: server.clone(),
+                    if self.memory_graph_tx.send(MemoryGraphMessage::SetConfig {
+                        key: format!("mcp.server.{}", server.name),
+                        value: entry_json,
                         reply_to: tx,
                     }).await.is_err() {
                         return serde_json::json!({"error": "MemoryGraph actor not available"});
@@ -1123,50 +1148,41 @@ impl CoordinatorActor {
                     }
                 }
 
-                // After successful import, reload the MCP client from the graph
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 if self.memory_graph_tx.send(MemoryGraphMessage::GetMcpConfig { reply_to: tx }).await.is_err() {
                     return serde_json::json!({"error": "MemoryGraph actor not available"});
                 }
                 match rx.await {
                     Ok(Ok(servers)) => {
-                        // Convert McpServerConfigEntry to McpServerConfig
                         let configs: Vec<crate::mcp::client::McpServerConfig> = servers
                             .into_iter()
                             .filter_map(|entry| {
                                 let transport = if let Some(url) = entry.url {
                                     crate::mcp::client::TransportConfig::Http {
-                                        url,
-                                        headers: entry.headers.unwrap_or_default(),
+                                        url, headers: entry.headers.unwrap_or_default(),
                                     }
                                 } else if let Some(command) = entry.command {
                                     crate::mcp::client::TransportConfig::Stdio {
-                                        command,
-                                        args: entry.args,
-                                        env: entry.env.unwrap_or_default(),
+                                        command, args: entry.args, env: entry.env.unwrap_or_default(),
                                     }
                                 } else {
                                     tracing::warn!("Coordinator: MCP server '{}' has no transport config, skipping", entry.name);
                                     return None;
                                 };
                                 Some(crate::mcp::client::McpServerConfig {
-                                    name: entry.name,
-                                    transport,
-                                    autostart: entry.autostart,
+                                    name: entry.name, transport, autostart: entry.autostart,
                                 })
                             })
                             .collect();
 
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         if self.mcp_client_tx.send(McpClientMessage::LoadConfigFromGraph {
-                            servers: configs,
-                            reply_to: tx,
+                            servers: configs, reply_to: tx,
                         }).await.is_err() {
                             return serde_json::json!({"error": "McpClient actor not available"});
                         }
                         let _ = rx.await;
 
-                        // Reconnect all servers
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         if self.mcp_client_tx.send(McpClientMessage::ConnectAll { reply_to: tx }).await.is_err() {
                             return serde_json::json!({"error": "McpClient actor not available"});
@@ -1190,86 +1206,46 @@ impl CoordinatorActor {
                     args: params.get("args").and_then(|v| v.as_array()).map(|arr| {
                         arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
                     }).unwrap_or_default(),
-
                     env: params.get("env").and_then(|v| v.as_object()).map(|obj| {
                         let mut map = std::collections::HashMap::new();
-                        for (k, v) in obj {
-                            if let Some(val) = v.as_str() {
-                                map.insert(k.clone(), val.to_string());
-                            }
-                        }
+                        for (k, v) in obj { if let Some(val) = v.as_str() { map.insert(k.clone(), val.to_string()); } }
                         map
                     }),
                     url: params.get("url").and_then(|v| v.as_str()).map(|s| s.to_string()),
                     headers: params.get("headers").and_then(|v| v.as_object()).map(|obj| {
                         let mut map = std::collections::HashMap::new();
-                        for (k, v) in obj {
-                            if let Some(val) = v.as_str() {
-                                map.insert(k.clone(), val.to_string());
-                            }
-                        }
+                        for (k, v) in obj { if let Some(val) = v.as_str() { map.insert(k.clone(), val.to_string()); } }
                         map
                     }),
                     autostart: params.get("autostart").and_then(|v| v.as_bool()).unwrap_or(true),
                 };
-
+                let entry_json = serde_json::to_value(entry).unwrap_or(serde_json::Value::Null);
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                if self.memory_graph_tx.send(MemoryGraphMessage::SaveMcpConfig {
-                    entry,
-                    reply_to: tx,
+                if self.memory_graph_tx.send(MemoryGraphMessage::SetConfig {
+                    key: format!("mcp.server.{}", name), value: entry_json, reply_to: tx,
                 }).await.is_err() {
                     return serde_json::json!({"error": "MemoryGraph actor not available"});
                 }
                 match rx.await {
                     Ok(Ok(())) => {
-                        // Reload MCP client from graph
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         if self.memory_graph_tx.send(MemoryGraphMessage::GetMcpConfig { reply_to: tx }).await.is_err() {
                             return serde_json::json!({"error": "MemoryGraph actor not available"});
                         }
                         match rx.await {
                             Ok(Ok(servers)) => {
-                                let configs: Vec<crate::mcp::client::McpServerConfig> = servers
-                                    .into_iter()
-                                    .filter_map(|entry| {
-                                        let transport = if let Some(url) = entry.url {
-                                            crate::mcp::client::TransportConfig::Http {
-                                                url,
-                                                headers: entry.headers.unwrap_or_default(),
-                                            }
-                                        } else if let Some(command) = entry.command {
-                                            crate::mcp::client::TransportConfig::Stdio {
-                                                command,
-                                                args: entry.args,
-                                                env: entry.env.unwrap_or_default(),
-                                            }
-                                        } else {
-                                            tracing::warn!("Coordinator: MCP server '{}' has no transport config, skipping", entry.name);
-                                            return None;
-                                        };
-                                        Some(crate::mcp::client::McpServerConfig {
-                                            name: entry.name,
-                                            transport,
-                                            autostart: entry.autostart,
-                                        })
-                                    })
-                                    .collect();
-
+                                let configs: Vec<crate::mcp::client::McpServerConfig> = servers.into_iter().filter_map(|entry| {
+                                    let transport = if let Some(url) = entry.url { crate::mcp::client::TransportConfig::Http { url, headers: entry.headers.unwrap_or_default() } }
+                                    else if let Some(command) = entry.command { crate::mcp::client::TransportConfig::Stdio { command, args: entry.args, env: entry.env.unwrap_or_default() } }
+                                    else { tracing::warn!("Coordinator: MCP server '{}' has no transport config, skipping", entry.name); return None; };
+                                    Some(crate::mcp::client::McpServerConfig { name: entry.name, transport, autostart: entry.autostart })
+                                }).collect();
                                 let (tx, rx) = tokio::sync::oneshot::channel();
-                                if self.mcp_client_tx.send(McpClientMessage::LoadConfigFromGraph {
-                                    servers: configs,
-                                    reply_to: tx,
-                                }).await.is_err() {
-                                    return serde_json::json!({"error": "McpClient actor not available"});
-                                }
+                                if self.mcp_client_tx.send(McpClientMessage::LoadConfigFromGraph { servers: configs, reply_to: tx }).await.is_err() { return serde_json::json!({"error": "McpClient actor not available"}); }
                                 let _ = rx.await;
-
                                 let (tx, rx) = tokio::sync::oneshot::channel();
-                                if self.mcp_client_tx.send(McpClientMessage::ConnectAll { reply_to: tx }).await.is_err() {
-                                    return serde_json::json!({"error": "McpClient actor not available"});
-                                }
+                                if self.mcp_client_tx.send(McpClientMessage::ConnectAll { reply_to: tx }).await.is_err() { return serde_json::json!({"error": "McpClient actor not available"}); }
                                 let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
-
                                 serde_json::json!({"success": true})
                             }
                             Ok(Err(e)) => serde_json::json!({"error": e.to_string()}),
@@ -1286,62 +1262,29 @@ impl CoordinatorActor {
                     return serde_json::json!({"error": "Missing 'name' parameter"});
                 }
                 let (tx, rx) = tokio::sync::oneshot::channel();
-                if self.memory_graph_tx.send(MemoryGraphMessage::DeleteMcpConfig {
-                    name,
-                    reply_to: tx,
+                if self.memory_graph_tx.send(MemoryGraphMessage::SetConfig {
+                    key: format!("mcp.server.{}", name), value: serde_json::Value::Null, reply_to: tx,
                 }).await.is_err() {
                     return serde_json::json!({"error": "MemoryGraph actor not available"});
                 }
                 match rx.await {
                     Ok(Ok(())) => {
-                        // Reload MCP client from graph
                         let (tx, rx) = tokio::sync::oneshot::channel();
-                        if self.memory_graph_tx.send(MemoryGraphMessage::GetMcpConfig { reply_to: tx }).await.is_err() {
-                            return serde_json::json!({"error": "MemoryGraph actor not available"});
-                        }
+                        if self.memory_graph_tx.send(MemoryGraphMessage::GetMcpConfig { reply_to: tx }).await.is_err() { return serde_json::json!({"error": "MemoryGraph actor not available"}); }
                         match rx.await {
                             Ok(Ok(servers)) => {
-                                let configs: Vec<crate::mcp::client::McpServerConfig> = servers
-                                    .into_iter()
-                                    .filter_map(|entry| {
-                                        let transport = if let Some(url) = entry.url {
-                                            crate::mcp::client::TransportConfig::Http {
-                                                url,
-                                                headers: entry.headers.unwrap_or_default(),
-                                            }
-                                        } else if let Some(command) = entry.command {
-                                            crate::mcp::client::TransportConfig::Stdio {
-                                                command,
-                                                args: entry.args,
-                                                env: entry.env.unwrap_or_default(),
-                                            }
-                                        } else {
-                                            tracing::warn!("Coordinator: MCP server '{}' has no transport config, skipping", entry.name);
-                                            return None;
-                                        };
-                                        Some(crate::mcp::client::McpServerConfig {
-                                            name: entry.name,
-                                            transport,
-                                            autostart: entry.autostart,
-                                        })
-                                    })
-                                    .collect();
-
+                                let configs: Vec<crate::mcp::client::McpServerConfig> = servers.into_iter().filter_map(|entry| {
+                                    let transport = if let Some(url) = entry.url { crate::mcp::client::TransportConfig::Http { url, headers: entry.headers.unwrap_or_default() } }
+                                    else if let Some(command) = entry.command { crate::mcp::client::TransportConfig::Stdio { command, args: entry.args, env: entry.env.unwrap_or_default() } }
+                                    else { tracing::warn!("Coordinator: MCP server '{}' has no transport config, skipping", entry.name); return None; };
+                                    Some(crate::mcp::client::McpServerConfig { name: entry.name, transport, autostart: entry.autostart })
+                                }).collect();
                                 let (tx, rx) = tokio::sync::oneshot::channel();
-                                if self.mcp_client_tx.send(McpClientMessage::LoadConfigFromGraph {
-                                    servers: configs,
-                                    reply_to: tx,
-                                }).await.is_err() {
-                                    return serde_json::json!({"error": "McpClient actor not available"});
-                                }
+                                if self.mcp_client_tx.send(McpClientMessage::LoadConfigFromGraph { servers: configs, reply_to: tx }).await.is_err() { return serde_json::json!({"error": "McpClient actor not available"}); }
                                 let _ = rx.await;
-
                                 let (tx, rx) = tokio::sync::oneshot::channel();
-                                if self.mcp_client_tx.send(McpClientMessage::ConnectAll { reply_to: tx }).await.is_err() {
-                                    return serde_json::json!({"error": "McpClient actor not available"});
-                                }
+                                if self.mcp_client_tx.send(McpClientMessage::ConnectAll { reply_to: tx }).await.is_err() { return serde_json::json!({"error": "McpClient actor not available"}); }
                                 let _ = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
-
                                 serde_json::json!({"success": true})
                             }
                             Ok(Err(e)) => serde_json::json!({"error": e.to_string()}),
@@ -1350,25 +1293,6 @@ impl CoordinatorActor {
                     }
                     Ok(Err(e)) => serde_json::json!({"error": e.to_string()}),
                     Err(_) => serde_json::json!({"error": "MemoryGraph actor response error"}),
-                }
-            }
-
-
-            // ── Project Query tools (memory graph queries) ──
-            // All project/* tools are handled by the ProjectQueryActor.
-            // This catch-all matches any method starting with "project/".
-            method if method.starts_with("project/") => {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                if self.project_query_tx.send(ProjectQueryMessage::CallTool {
-                    tool: method.to_string(),
-                    args: params.clone(),
-                    reply_to: tx,
-                }).await.is_err() {
-                    return serde_json::json!({"error": "ProjectQuery actor not available"});
-                }
-                match rx.await {
-                    Ok(result) => result,
-                    Err(_) => serde_json::json!({"error": "ProjectQuery actor response error"}),
                 }
             }
 
@@ -1385,27 +1309,11 @@ impl CoordinatorActor {
     }
 
     /// Parse XML/Claude-format tool calls from a response content string.
-    ///
-    /// DeepSeek sometimes returns tool calls in this format instead of the
-    /// native JSON `tool_calls` field:
-    ///
-    /// ```xml
-    /// <｜DSML｜function_calls>
-    ///   <｜DSML｜invoke name="get_weather">
-    ///     <｜DSML｜parameter name="location" string="true">San Francisco</｜DSML｜parameter>
-    ///   </｜DSML｜invoke>
-    /// </｜DSML｜function_calls>
-    /// ```
-    ///
-    /// Returns `None` if no XML tool calls are found.
     fn parse_xml_tool_calls(content: &str) -> Option<Vec<serde_json::Value>> {
-        // Check if the content contains function_calls markup
         if !content.contains("function_calls") {
             return None;
         }
 
-        // Regex to extract each invoke block
-        // Use a raw string with hashes to avoid escaping issues with quotes
         let invoke_re = Regex::new(
             r#"(?s)<(?:｜DSML｜)?invoke\s+name\s*=\s*"([^"]+)">(.*?)</(?:｜DSML｜)?invoke>"#
         ).ok()?;
@@ -1417,7 +1325,6 @@ impl CoordinatorActor {
             let function_name = cap.get(1)?.as_str().to_string();
             let params_body = cap.get(2)?.as_str();
 
-            // Parse parameters
             let param_re = Regex::new(
                 r#"<(?:｜DSML｜)?parameter\s+name\s*=\s*"([^"]+)"(?:\s+string\s*=\s*"(true|false)")?\s*>(.*?)</(?:｜DSML｜)?parameter>"#
             ).ok()?;

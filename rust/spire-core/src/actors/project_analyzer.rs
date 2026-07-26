@@ -3,32 +3,38 @@
 
 //! ProjectAnalyzerActor — semantic project analysis for LLM understanding.
 //!
-//! This actor uses the `analyzer` module to produce a structured, semantic
-//! representation of a project's directory structure, build systems, languages,
-//! and architecture. The output is designed to give an LLM a rich understanding
-//! of the project without needing to read every file.
+//! This actor produces a structured, semantic representation of a project's
+//! directory structure, build systems, languages, and architecture. The output
+//! is designed to give an LLM a rich understanding of the project without
+//! needing to read every file.
 //!
-//! # Output
+//! # Architecture
 //!
-//! The actor produces a `ProjectAnalysis` struct containing:
-//! - Full file tree with semantic role annotations
-//! - Build system metadata (Cargo, npm, Python, Go, Gradle, Maven, CMake, Make, Meson)
-//! - Language breakdown
-//! - Directory role classification
-//! - Entry points and key files
-//! - Architecture summary
+//! Build system analysis is **delegated to external MCP servers** (mcp-cargo,
+//! mcp-node, etc.) via the McpClientActor. The ProjectAnalyzerActor:
+//!
+//! 1. Scans the filesystem for build config files (Cargo.toml, package.json, etc.)
+//! 2. Discovers which MCP servers can analyze each build file by calling
+//!    `describe_analysis_capabilities` on each connected MCP server
+//! 3. Delegates analysis to the matching MCP server via its `analyze` tool
+//! 4. Falls back to the local `analyzer` module for file tree, language
+//!    detection, and architecture summary (which don't need MCP servers)
+//!
+//! This is a **pure actor-based** design — no direct function calls to
+//! build parsers. All build analysis flows through the actor message system.
 
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::sync::oneshot;
-use tracing::{debug, info};
+use tokio::sync::{mpsc, oneshot};
+use tracing::{debug, info, warn};
 
 use crate::actors::Actor;
+use crate::actors::mcp_client::McpClientMessage;
 use crate::analyzer::models::*;
 use crate::analyzer::scanner;
 use crate::analyzer::tree_builder;
-use crate::analyzer::build_parsers;
 
 // ============================================================================
 // ProjectAnalysis — the structured output
@@ -86,6 +92,8 @@ pub struct RoleBreakdown {
 pub enum ProjectAnalyzerMessage {
     /// Initialize the actor with resources.
     Initialize {
+        /// Sender to the McpClientActor for delegating build analysis.
+        mcp_client_tx: mpsc::Sender<McpClientMessage>,
         reply_to: oneshot::Sender<Result<()>>,
     },
     /// Analyze a project at the given root path.
@@ -104,12 +112,17 @@ pub enum ProjectAnalyzerMessage {
 // ProjectAnalyzerActor
 // ============================================================================
 
-/// The ProjectAnalyzer actor — semantic project analysis.
-pub struct ProjectAnalyzerActor;
+/// The ProjectAnalyzer actor — semantic project analysis via MCP delegation.
+pub struct ProjectAnalyzerActor {
+    /// Sender to the McpClientActor for delegating build analysis to MCP servers.
+    mcp_client_tx: Option<mpsc::Sender<McpClientMessage>>,
+}
 
 impl ProjectAnalyzerActor {
     pub fn new() -> Self {
-        Self
+        Self {
+            mcp_client_tx: None,
+        }
     }
 
     /// Perform a full semantic analysis of a project.
@@ -125,18 +138,18 @@ impl ProjectAnalyzerActor {
         let file_tree = tree_builder::build_file_tree(project_root, false);
         debug!("ProjectAnalyzer: built file tree");
 
-        // 3. Detect build config files and parse them
+        // 3. Detect build config files and delegate analysis to MCP servers
         let build_configs = scanner::discover_build_files(project_root, false);
-        let mut build_systems: Vec<BuildMetadata> = Vec::new();
-        for (build_file, _parent_dir) in &build_configs {
-            if let Some(metadata) = build_parsers::parse_build_file(project_root, build_file, &files) {
-                build_systems.push(metadata);
-            }
-        }
-        debug!("ProjectAnalyzer: detected {} build systems", build_systems.len());
+        // Convert Vec<(String, String)> to Vec<(PathBuf, PathBuf)>
+        let build_configs_pathbuf: Vec<(PathBuf, PathBuf)> = build_configs
+            .into_iter()
+            .map(|(a, b)| (PathBuf::from(a), PathBuf::from(b)))
+            .collect();
+        let build_systems = self.analyze_build_systems_via_mcp(project_root, &build_configs_pathbuf).await;
+        debug!("ProjectAnalyzer: detected {} build systems via MCP", build_systems.len());
 
         // 4. Compute language breakdown from the file tree
-        let mut lang_map: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+        let mut lang_map: HashMap<String, (usize, usize)> = HashMap::new();
         collect_languages_from_tree(&file_tree, &mut lang_map);
         let mut languages: Vec<LanguageBreakdown> = lang_map
             .into_iter()
@@ -149,7 +162,7 @@ impl ProjectAnalyzerActor {
         languages.sort_by(|a, b| b.file_count.cmp(&a.file_count));
 
         // 5. Compute directory role breakdown
-        let mut dir_role_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut dir_role_map: HashMap<String, usize> = HashMap::new();
         collect_directory_roles(&file_tree, &mut dir_role_map);
         let mut directory_roles: Vec<RoleBreakdown> = dir_role_map
             .into_iter()
@@ -158,7 +171,7 @@ impl ProjectAnalyzerActor {
         directory_roles.sort_by(|a, b| b.count.cmp(&a.count));
 
         // 6. Compute file role breakdown
-        let mut file_role_map: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut file_role_map: HashMap<String, usize> = HashMap::new();
         collect_file_roles(&file_tree, &mut file_role_map);
         let mut file_roles: Vec<RoleBreakdown> = file_role_map
             .into_iter()
@@ -216,10 +229,329 @@ impl ProjectAnalyzerActor {
         Ok(analysis)
     }
 
+    /// Analyze build systems by delegating to MCP servers.
+    ///
+    /// For each discovered build config file, this method:
+    /// 1. Calls `describe_analysis_capabilities` on all connected MCP servers
+    ///    to find which server can handle the build file
+    /// 2. Calls the matching server's `analyze` tool with the project path
+    /// 3. Collects the results into a `Vec<BuildMetadata>`
+    async fn analyze_build_systems_via_mcp(
+        &self,
+        project_root: &Path,
+        build_configs: &[(PathBuf, PathBuf)],
+    ) -> Vec<BuildMetadata> {
+        let mcp_client_tx = match &self.mcp_client_tx {
+            Some(tx) => tx.clone(),
+            None => {
+                warn!("ProjectAnalyzer: no mcp_client_tx available, skipping MCP build analysis");
+                return Vec::new();
+            }
+        };
+
+        if build_configs.is_empty() {
+            return Vec::new();
+        }
+
+        // Step 1: Discover which MCP servers expose a `describe_analysis_capabilities`
+        // tool. Uses `GetConnectedServersWithTools` to get each server's tool list,
+        // then filters to only build-capable servers.
+        let server_names = self.discover_mcp_servers(&mcp_client_tx).await;
+
+        if server_names.is_empty() {
+            warn!("ProjectAnalyzer: no MCP servers available for build analysis");
+            return Vec::new();
+        }
+
+        // Step 2: Query each server's capabilities
+        let mut capability_map: HashMap<String, McpServerCapability> = HashMap::new();
+        for server_name in &server_names {
+            match self.query_server_capabilities(&mcp_client_tx, server_name).await {
+                Some(cap) => {
+                    debug!("ProjectAnalyzer: server '{}' capabilities: {:?}", server_name, cap);
+                    capability_map.insert(server_name.clone(), cap);
+                }
+                None => {
+                    debug!("ProjectAnalyzer: server '{}' has no describe_analysis_capabilities tool", server_name);
+                }
+            }
+        }
+
+        // Step 3: For each build config file, find a matching server and delegate
+        let mut build_systems: Vec<BuildMetadata> = Vec::new();
+        for (build_file, _parent_dir) in build_configs {
+            let build_file_name = build_file.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Find a server whose supported_files include this build file
+            let matching_server = capability_map.iter().find(|(_name, cap)| {
+                cap.supported_files.iter().any(|pattern| {
+                    // Simple glob matching: check if the build file name matches
+                    // the supported file pattern
+                    if pattern == &build_file_name {
+                        return true;
+                    }
+                    // Handle wildcard patterns like "*.toml"
+                    if let Some(ext) = pattern.strip_prefix("*.") {
+                        if build_file_name.ends_with(ext) {
+                            return true;
+                        }
+                    }
+                    false
+                })
+            });
+
+            match matching_server {
+                Some((server_name, cap)) => {
+                    debug!(
+                        "ProjectAnalyzer: delegating '{}' to server '{}' (tool: {})",
+                        build_file_name, server_name, cap.analyzer_tool
+                    );
+                    match self.delegate_analysis(
+                        &mcp_client_tx,
+                        server_name,
+                        &cap.analyzer_tool,
+                        project_root,
+                    ).await {
+                        Some(metadata) => {
+                            build_systems.push(metadata);
+                        }
+                        None => {
+                            warn!(
+                                "ProjectAnalyzer: MCP analysis failed for '{}' via server '{}'",
+                                build_file_name, server_name
+                            );
+                        }
+                    }
+                }
+                None => {
+                    debug!(
+                        "ProjectAnalyzer: no MCP server can handle '{}', skipping",
+                        build_file_name
+                    );
+                }
+            }
+        }
+
+        build_systems
+    }
+
+    /// Discover MCP servers that expose a `describe_analysis_capabilities` tool.
+    ///
+    /// Uses `GetConnectedServersWithTools` to get each server's tool list, then
+    /// filters to only servers that advertise the capability introspection tool.
+    /// This avoids calling `describe_analysis_capabilities` on servers that don't
+    /// implement it (e.g., mcp-git, mcp-filesystem, mcp-terminal, etc.).
+    async fn discover_mcp_servers(
+        &self,
+        mcp_client_tx: &mpsc::Sender<McpClientMessage>,
+    ) -> Vec<String> {
+        let (tx, rx) = oneshot::channel();
+        if mcp_client_tx
+            .send(McpClientMessage::GetConnectedServersWithTools { reply_to: tx })
+            .await
+            .is_err()
+        {
+            warn!("ProjectAnalyzer: failed to send GetConnectedServersWithTools");
+            return Vec::new();
+        }
+
+        match rx.await {
+            Ok(servers_with_tools) => {
+                let capable: Vec<String> = servers_with_tools
+                    .into_iter()
+                    .filter(|(_name, tools)| {
+                        tools.iter().any(|t| t.name == "describe_analysis_capabilities")
+                    })
+                    .map(|(name, _tools)| name)
+                    .collect();
+                debug!(
+                    "ProjectAnalyzer: discovered {} build-capable MCP servers: {:?}",
+                    capable.len(),
+                    capable
+                );
+                capable
+            }
+            Err(e) => {
+                warn!("ProjectAnalyzer: GetConnectedServersWithTools response error: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Query a single MCP server's analysis capabilities.
+    async fn query_server_capabilities(
+        &self,
+        mcp_client_tx: &mpsc::Sender<McpClientMessage>,
+        server_name: &str,
+    ) -> Option<McpServerCapability> {
+        let (tx, rx) = oneshot::channel();
+        if mcp_client_tx
+            .send(McpClientMessage::CallTool {
+                server_name: server_name.to_string(),
+                tool_name: "describe_analysis_capabilities".to_string(),
+                arguments: None,
+                reply_to: tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!("ProjectAnalyzer: failed to send CallTool to server '{}'", server_name);
+            return None;
+        }
+
+        match rx.await {
+            Ok(Ok(result)) => {
+                // Parse the text content as JSON
+                for content in &result.content {
+                    if let rust_mcp_sdk::schema::ContentBlock::TextContent(tc) = content {
+                        if let Ok(cap) = serde_json::from_str::<McpServerCapability>(&tc.text) {
+                            return Some(cap);
+                        }
+                    }
+                }
+                warn!(
+                    "ProjectAnalyzer: could not parse capabilities from server '{}'",
+                    server_name
+                );
+                None
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "ProjectAnalyzer: server '{}' describe_analysis_capabilities failed: {}",
+                    server_name, e
+                );
+                None
+            }
+            Err(e) => {
+                warn!(
+                    "ProjectAnalyzer: server '{}' describe_analysis_capabilities response error: {}",
+                    server_name, e
+                );
+                None
+            }
+        }
+    }
+
+    /// Delegate build analysis to a specific MCP server.
+    async fn delegate_analysis(
+        &self,
+        mcp_client_tx: &mpsc::Sender<McpClientMessage>,
+        server_name: &str,
+        tool_name: &str,
+        project_root: &Path,
+    ) -> Option<BuildMetadata> {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "path".to_string(),
+            serde_json::Value::String(project_root.to_string_lossy().to_string()),
+        );
+
+        let (tx, rx) = oneshot::channel();
+        if mcp_client_tx
+            .send(McpClientMessage::CallTool {
+                server_name: server_name.to_string(),
+                tool_name: tool_name.to_string(),
+                arguments: Some(args),
+                reply_to: tx,
+            })
+            .await
+            .is_err()
+        {
+            warn!(
+                "ProjectAnalyzer: failed to send CallTool to server '{}' for tool '{}'",
+                server_name, tool_name
+            );
+            return None;
+        }
+
+        match rx.await {
+            Ok(Ok(result)) => {
+                for content in &result.content {
+                    if let rust_mcp_sdk::schema::ContentBlock::TextContent(tc) = content {
+                        let text = &tc.text;
+                        // Try to parse as BuildMetadata directly
+                        match serde_json::from_str::<BuildMetadata>(text) {
+                            Ok(metadata) => return Some(metadata),
+                            Err(e1) => {
+                                // Try to parse as a wrapper { success: true, ... }
+                                match serde_json::from_str::<serde_json::Value>(text) {
+                                    Ok(wrapper) => {
+                                        if let Some(inner) = wrapper.get("success") {
+                                            if inner.as_bool() == Some(true) {
+                                                // The actual metadata might be nested
+                                                if let Some(data) = wrapper.get("data") {
+                                                    match serde_json::from_value::<BuildMetadata>(data.clone()) {
+                                                        Ok(metadata) => return Some(metadata),
+                                                        Err(e2) => {
+                                                            warn!(
+                                                                "ProjectAnalyzer: could not parse BuildMetadata from server '{}' tool '{}': direct={}, nested={}",
+                                                                server_name, tool_name, e1, e2
+                                                            );
+                                                        }
+                                                    }
+                                                } else {
+                                                    warn!(
+                                                        "ProjectAnalyzer: server '{}' tool '{}' returned success=true but no 'data' field. Raw: {}",
+                                                        server_name, tool_name, text
+                                                    );
+                                                }
+                                            } else {
+                                                warn!(
+                                                    "ProjectAnalyzer: server '{}' tool '{}' returned success=false. Raw: {}",
+                                                    server_name, tool_name, text
+                                                );
+                                            }
+                                        } else {
+                                            warn!(
+                                                "ProjectAnalyzer: could not parse BuildMetadata from server '{}' tool '{}': {}. Raw: {}",
+                                                server_name, tool_name, e1, text
+                                            );
+                                        }
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            "ProjectAnalyzer: could not parse BuildMetadata from server '{}' tool '{}': {}. Raw: {}",
+                                            server_name, tool_name, e1, text
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None
+
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    "ProjectAnalyzer: server '{}' tool '{}' failed: {}",
+                    server_name, tool_name, e
+                );
+                None
+            }
+            Err(e) => {
+                warn!(
+                    "ProjectAnalyzer: server '{}' tool '{}' response error: {}",
+                    server_name, tool_name, e
+                );
+                None
+            }
+        }
+    }
+
     /// Generate a concise text summary of the project.
     async fn summarize(&self, project_root: &Path) -> Result<String> {
         let analysis = self.analyze(project_root).await?;
         Ok(format_project_summary(&analysis))
+    }
+}
+
+impl Default for ProjectAnalyzerActor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -234,9 +566,11 @@ impl Actor for ProjectAnalyzerActor {
     async fn handle(&mut self, msg: Self::Message) {
         match msg {
             ProjectAnalyzerMessage::Initialize {
+                mcp_client_tx,
                 reply_to,
             } => {
-                info!("ProjectAnalyzerActor: initialized");
+                self.mcp_client_tx = Some(mcp_client_tx);
+                info!("ProjectAnalyzerActor: initialized with MCP client channel");
                 let _ = reply_to.send(Ok(()));
             }
             ProjectAnalyzerMessage::Analyze {
@@ -264,7 +598,7 @@ impl Actor for ProjectAnalyzerActor {
 /// Recursively collect language statistics from the file tree.
 fn collect_languages_from_tree(
     dir: &DirectoryNode,
-    map: &mut std::collections::HashMap<String, (usize, usize)>,
+    map: &mut HashMap<String, (usize, usize)>,
 ) {
     for file in &dir.files {
         let entry = map.entry(file.language.clone()).or_insert((0, 0));
@@ -279,7 +613,7 @@ fn collect_languages_from_tree(
 /// Recursively collect directory role statistics.
 fn collect_directory_roles(
     dir: &DirectoryNode,
-    map: &mut std::collections::HashMap<String, usize>,
+    map: &mut HashMap<String, usize>,
 ) {
     *map.entry(dir.role.clone()).or_insert(0) += 1;
     for subdir in &dir.directories {
@@ -290,7 +624,7 @@ fn collect_directory_roles(
 /// Recursively collect file role statistics.
 fn collect_file_roles(
     dir: &DirectoryNode,
-    map: &mut std::collections::HashMap<String, usize>,
+    map: &mut HashMap<String, usize>,
 ) {
     for file in &dir.files {
         *map.entry(file.role.clone()).or_insert(0) += 1;

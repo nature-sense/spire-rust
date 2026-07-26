@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 NatureSense
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+
 use candle_core::{safetensors::BufferedSafetensors, Device, Tensor};
 use candle_transformers::models::bert::{BertModel, Config, DTYPE};
 use candle_nn::VarBuilder;
@@ -18,11 +20,23 @@ const MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 /// Expected embedding dimensionality.
 const EXPECTED_DIMS: usize = 384;
 
+/// Subdirectory name under the binary's parent directory where bundled model
+/// files are expected (e.g. `<binary_dir>/models/all-MiniLM-L6-v2/`).
+const BUNDLED_MODEL_DIR: &str = "models/all-MiniLM-L6-v2";
+
 /// A Candle-based embedder using the all-MiniLM-L6-v2 Sentence Transformer model.
 ///
 /// This struct loads the model weights via `hf-hub` (cached at
 /// `~/.cache/huggingface/`) and runs inference using Candle's Metal backend
 /// on Apple Silicon (falling back to CPU).
+///
+/// ## Load priority
+///
+/// 1. **Bundled path** — model files shipped alongside the binary in the VSIX
+///    extension directory (no network, no HF cache needed).
+/// 2. **HF cache** — `~/.cache/huggingface/hub/` (fast, from previous download).
+/// 3. **HF download** — fallback to downloading from Hugging Face Hub (slow,
+///    requires network).
 pub struct CandleEmbedder {
     model: BertModel,
     tokenizer: Tokenizer,
@@ -31,25 +45,108 @@ pub struct CandleEmbedder {
 }
 
 impl CandleEmbedder {
-    /// Create a new `CandleEmbedder`, loading the model from Hugging Face Hub.
+    /// Create a new `CandleEmbedder`, trying bundled path first, then HF cache/download.
     ///
-    /// The first call will download ~85 MB of model weights to
-    /// `~/.cache/huggingface/`. Subsequent calls reuse the cached files.
-    ///
-    /// Uses Metal GPU acceleration on macOS (Apple Silicon) and CPU elsewhere.
+    /// The load priority is:
+    /// 1. Model files in `<binary_dir>/models/all-MiniLM-L6-v2/` (bundled in VSIX)
+    /// 2. Hugging Face Hub cache (`~/.cache/huggingface/hub/`)
+    /// 3. Download from Hugging Face Hub (requires network)
     pub fn new() -> Result<Self> {
         let device = Self::select_device();
 
+        // Try bundled path first (model shipped alongside the binary in VSIX)
+        if let Some(bundled_dir) = Self::find_bundled_model_dir() {
+            info!(
+                "Found bundled model directory: {}",
+                bundled_dir.display()
+            );
+            match Self::load_from_dir(&bundled_dir, &device) {
+                Ok(embedder) => return Ok(embedder),
+                Err(e) => {
+                    warn!(
+                        "Failed to load from bundled model directory ({}): {}. Falling back to HF.",
+                        bundled_dir.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        // Fall back to Hugging Face Hub (cache or download)
         info!(
-            "Loading embedding model '{}' on {:?} (this may take a few seconds the first time)...",
+            "Loading embedding model '{}' from Hugging Face Hub on {:?}...",
             MODEL_ID, device
         );
+        Self::load_from_hf(&device)
+    }
 
+    /// Create a `CandleEmbedder` from a specific model directory on disk.
+    ///
+    /// The directory must contain `config.json`, `tokenizer.json`, and
+    /// `model.safetensors`.
+    pub fn from_directory<P: AsRef<Path>>(model_dir: P) -> Result<Self> {
+        let device = Self::select_device();
+        Self::load_from_dir(model_dir.as_ref(), &device)
+    }
+
+    /// Try to find a bundled model directory relative to the current executable.
+    ///
+    /// Looks for `<binary_dir>/models/all-MiniLM-L6-v2/` where `binary_dir` is
+    /// the directory containing the running `spire-core` binary.
+    fn find_bundled_model_dir() -> Option<PathBuf> {
+        let exe_path = std::env::current_exe().ok()?;
+        let exe_dir = exe_path.parent()?;
+        let model_dir = exe_dir.join(BUNDLED_MODEL_DIR);
+        if model_dir.is_dir() {
+            Some(model_dir)
+        } else {
+            None
+        }
+    }
+
+    /// Load model files from a local directory.
+    fn load_from_dir(model_dir: &Path, device: &Device) -> Result<Self> {
         let start = std::time::Instant::now();
 
-        // Download model weights and tokenizer from Hugging Face Hub
+        let config_path = model_dir.join("config.json");
+        let tokenizer_path = model_dir.join("tokenizer.json");
+        let weights_path = model_dir.join("model.safetensors");
+
+        if !config_path.exists() {
+            anyhow::bail!("config.json not found in {}", model_dir.display());
+        }
+        if !tokenizer_path.exists() {
+            anyhow::bail!("tokenizer.json not found in {}", model_dir.display());
+        }
+        if !weights_path.exists() {
+            anyhow::bail!("model.safetensors not found in {}", model_dir.display());
+        }
+
+        let config_bytes = std::fs::read(&config_path)
+            .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        let tokenizer_bytes = std::fs::read(&tokenizer_path)
+            .with_context(|| format!("Failed to read {}", tokenizer_path.display()))?;
+        let weights_bytes = std::fs::read(&weights_path)
+            .with_context(|| format!("Failed to read {}", weights_path.display()))?;
+
+        let embedder = Self::load_from_bytes(&config_bytes, &tokenizer_bytes, &weights_bytes, device)?;
+
+        let elapsed = start.elapsed();
+        info!(
+            "Embedding model loaded from bundled path in {:.2}s on {:?} ({} dimensions)",
+            elapsed.as_secs_f64(),
+            device,
+            EXPECTED_DIMS,
+        );
+
+        Ok(embedder)
+    }
+
+    /// Load model from Hugging Face Hub (cache or download).
+    fn load_from_hf(device: &Device) -> Result<Self> {
+        let start = std::time::Instant::now();
+
         let client = HFClientSync::new().context("Failed to initialize Hugging Face Hub client")?;
-        // MODEL_ID is "owner/name" format, split it
         let parts: Vec<&str> = MODEL_ID.split('/').collect();
         let (owner, name) = match parts.as_slice() {
             [owner, name] => (*owner, *name),
@@ -76,37 +173,46 @@ impl CandleEmbedder {
             .send()
             .context("Failed to download model.safetensors")?;
 
-        // Load config
-        let config: Config =
-            serde_json::from_slice(&config_bytes).context("Failed to parse config.json")?;
-
-        // Load tokenizer
-        let tokenizer = Tokenizer::from_bytes(&tokenizer_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
-
-        // Load weights using BufferedSafetensors
-        let st = BufferedSafetensors::new(weights_bytes.to_vec())
-            .context("Failed to parse safetensors")?;
-        let vb = VarBuilder::from_backend(Box::new(st), DTYPE, device.clone());
-
-        // Build the BERT model
-        let model = BertModel::load(vb, &config)?;
+        let embedder = Self::load_from_bytes(&config_bytes, &tokenizer_bytes, &weights_bytes, device)?;
 
         let elapsed = start.elapsed();
         info!(
-            "Embedding model loaded in {:.2}s on {:?} ({} dimensions)",
+            "Embedding model loaded from Hugging Face Hub in {:.2}s on {:?} ({} dimensions)",
             elapsed.as_secs_f64(),
             device,
             EXPECTED_DIMS,
         );
 
+        Ok(embedder)
+    }
+
+    /// Common path: parse config, tokenizer, and weights bytes into a model.
+    fn load_from_bytes(
+        config_bytes: &[u8],
+        tokenizer_bytes: &[u8],
+        weights_bytes: &[u8],
+        device: &Device,
+    ) -> Result<Self> {
+        let config: Config =
+            serde_json::from_slice(config_bytes).context("Failed to parse config.json")?;
+
+        let tokenizer = Tokenizer::from_bytes(tokenizer_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
+
+        let st = BufferedSafetensors::new(weights_bytes.to_vec())
+            .context("Failed to parse safetensors")?;
+        let vb = VarBuilder::from_backend(Box::new(st), DTYPE, device.clone());
+
+        let model = BertModel::load(vb, &config)?;
+
         Ok(Self {
             model,
             tokenizer,
-            device,
+            device: device.clone(),
             model_name: MODEL_ID.to_owned(),
         })
     }
+
 
     /// Select the best available device.
     ///

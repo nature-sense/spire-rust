@@ -1096,15 +1096,58 @@ impl ServerHandler for FilesystemHandler {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Initialise tracing for an MCP server.
+///
+/// If `SPIRE_LOG_DIR` is set, logs are written to a file at
+/// `$SPIRE_LOG_DIR/<server_name>/<server_name>.log.YYYY-MM-DD`.
+/// Otherwise, logs go to stderr (the default).
+///
+/// Leaks a `WorkerGuard` so the non-blocking writer thread lives for the
+/// entire process lifetime. Without this, the guard is dropped when the
+/// function returns and no log output is ever written to the file.
+fn init_mcp_logging(server_name: &str) {
+    if let Ok(log_dir) = std::env::var("SPIRE_LOG_DIR") {
+        let server_log_dir = std::path::PathBuf::from(&log_dir).join(server_name);
+        let _ = std::fs::create_dir_all(&server_log_dir);
+
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let log_path = server_log_dir.join(format!("{}.log.{}", server_name, date));
+
+        let log_file = std::fs::File::create(&log_path)
+            .expect("Failed to create MCP log file");
+        let (non_blocking, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .buffered_lines_limit(128)
+            .finish(log_file);
+
+        // Leak the guard so the non-blocking writer thread lives for the
+        // entire process lifetime.
+        Box::leak(Box::new(guard));
+
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .with_target(false)
+            .init();
+
+        eprintln!("[{}] Logging to: {}", server_name, log_path.display());
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| "info".into()),
+            )
+            .with_target(false)
+            .init();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .with_target(false)
-        .init();
+    init_mcp_logging("mcp-filesystem");
 
     // Collect allowed directories from CLI arguments.
     // If none are provided, default to the current working directory.

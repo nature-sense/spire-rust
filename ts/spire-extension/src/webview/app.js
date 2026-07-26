@@ -39,6 +39,8 @@
     toolEvents: [],       // { id, tool_name, status, args, result, error, duration_ms, timestamp }
     toolEventIdCounter: 0,
     maxToolEvents: 200,   // keep last 200 events
+    // Build progress tracking — shows build status as a system message in chat
+    buildProgressMessageId: null,  // tracks the DOM element id for the build progress message
   };
 
   // ── DOM References ────────────────────────────────────────────────────────
@@ -52,55 +54,12 @@
   const errorBanner = document.getElementById('error-banner');
   const typingIndicator = document.getElementById('typing-indicator');
 
-  // Startup overlay references
-  const startupOverlay = document.getElementById('startup-overlay');
-  const startupStatus = document.getElementById('startup-status');
-
   // Restore previous state if available (persists across webview reloads)
   const previousState = vscode.getState();
   if (previousState && previousState.messages && previousState.messages.length > 0) {
     state.messages = previousState.messages;
     state.chatId = previousState.chatId || 'default';
     state.activeTab = previousState.activeTab || 'chat';
-  }
-
-  // NOTE: The startup overlay is NOT hidden based on persisted state here.
-  // Instead, the extension host sends an 'initStatus' message when the webview
-  // signals it's ready. If the core has already completed initialization,
-  // the overlay is hidden immediately. If not, it stays visible until the
-  // progress notification with percent=100 arrives.
-  // This avoids the bug where persisted state from a previous VS Code session
-  // would incorrectly hide the overlay during a fresh initialization.
-
-
-  /**
-   * Safety fallback: if the Rust core never sends percent=100 (e.g. due to a
-   * bug or edge case), dismiss the overlay after 120 seconds so the user isn't
-   * stuck looking at it forever. This timer is cleared once completeStartup()
-   * is called via the normal progress notification path.
-   */
-  let startupFallbackTimer = setTimeout(() => {
-    completeStartup();
-  }, 120000);
-
-  function completeStartup() {
-    // Clear the safety fallback timer if it hasn't fired yet
-    if (startupFallbackTimer) {
-      clearTimeout(startupFallbackTimer);
-      startupFallbackTimer = null;
-    }
-
-    startupStatus.textContent = 'Starting Spire — complete!';
-
-    // Persist that startup has completed so subsequent webview loads
-    // (e.g. when re-selecting the sidebar) skip the startup overlay.
-    const currentState = vscode.getState() || {};
-    vscode.setState({ ...currentState, startupComplete: true });
-
-    // Hide the overlay after a brief delay
-    setTimeout(() => {
-      startupOverlay.classList.add('hidden');
-    }, 800);
   }
 
 
@@ -112,36 +71,33 @@
   const mcpServerList = document.getElementById('mcp-server-list');
   const mcpEmptyState = document.getElementById('mcp-empty-state');
   const mcpRefreshBtn = document.getElementById('mcp-refresh-btn');
-  const mcpImportBtn = document.getElementById('mcp-import-btn');
-  const mcpAddBtn = document.getElementById('mcp-add-btn');
-
-  // MCP Config Modal references
-  const mcpConfigModal = document.getElementById('mcp-config-modal');
-  const mcpConfigModalTitle = document.getElementById('mcp-config-modal-title');
-  const mcpConfigModalClose = document.getElementById('mcp-config-modal-close');
-  const mcpConfigName = document.getElementById('mcp-config-name');
-  const mcpConfigTransport = document.getElementById('mcp-config-transport');
-  const mcpConfigCommand = document.getElementById('mcp-config-command');
-  const mcpConfigArgs = document.getElementById('mcp-config-args');
-  const mcpConfigUrl = document.getElementById('mcp-config-url');
-  const mcpConfigHeaders = document.getElementById('mcp-config-headers');
-  const mcpConfigEnv = document.getElementById('mcp-config-env');
-  const mcpConfigAutostart = document.getElementById('mcp-config-autostart');
-  const mcpConfigSaveBtn = document.getElementById('mcp-config-save-btn');
-  const mcpConfigCancelBtn = document.getElementById('mcp-config-cancel-btn');
-  const mcpConfigDeleteBtn = document.getElementById('mcp-config-delete-btn');
-  const mcpConfigStatus = document.getElementById('mcp-config-status');
-  const mcpConfigCommandGroup = document.getElementById('mcp-config-command-group');
-  const mcpConfigArgsGroup = document.getElementById('mcp-config-args-group');
-  const mcpConfigUrlGroup = document.getElementById('mcp-config-url-group');
-  const mcpConfigHeadersGroup = document.getElementById('mcp-config-headers-group');
-
-  // State for the MCP config editor
-  let mcpConfigEditingName = null; // null = creating new, string = editing existing
 
   // ── JSON-RPC Helpers ──────────────────────────────────────────────────────
 
   let requestIdCounter = 0;
+
+  /**
+   * Default timeout per method prefix (in milliseconds).
+   * LLM methods get 120s to match the Rust LlmActor's reqwest timeout.
+   * Other methods use 30s.
+   */
+  const METHOD_TIMEOUTS = {
+    'llm/': 120_000,
+    'chat/': 120_000,
+    'default': 30_000,
+  };
+
+  /**
+   * Get the timeout for a given method.
+   */
+  function getTimeout(method) {
+    for (const [prefix, timeout] of Object.entries(METHOD_TIMEOUTS)) {
+      if (method.startsWith(prefix)) {
+        return timeout;
+      }
+    }
+    return METHOD_TIMEOUTS['default'];
+  }
 
   /**
    * Send a JSON-RPC call to the extension host.
@@ -159,13 +115,14 @@
         id,
       });
 
-      // Timeout after 30s
+      // Use method-specific timeout (LLM calls can take >60s)
+      const timeout = getTimeout(method);
       setTimeout(() => {
         if (state.pendingRequests.has(id)) {
           state.pendingRequests.delete(id);
           reject(new Error(`Request timed out: ${method}`));
         }
-      }, 30000);
+      }, timeout);
     });
   }
 
@@ -205,6 +162,11 @@
     // Load MCP data when switching to MCP tab
     if (tabName === 'mcp' && state.mcpServers.length === 0 && !state.mcpLoading) {
       loadMcpServers();
+    }
+
+    // Load project analysis when switching to Project tab
+    if (tabName === 'project') {
+      loadProjectAnalysis();
     }
   }
 
@@ -251,7 +213,11 @@
 
     try {
       const tools = await call('mcp/listServerTools', { serverName });
-      state.mcpServerTools[serverName] = tools || [];
+      // Defensive: ensure tools is an array before storing it.
+      // The Rust core should always return an array, but if something goes wrong
+      // (e.g. an error object is returned), we fall back to an empty array
+      // to avoid "tools.forEach is not a function" crashes in renderMcpServers.
+      state.mcpServerTools[serverName] = Array.isArray(tools) ? tools : [];
       state.mcpExpandedServer = serverName;
       renderMcpServers();
     } catch (err) {
@@ -337,40 +303,7 @@
         loadServerTools(server.name);
       });
 
-      // ── Action buttons (edit / delete) ──
-      const actions = document.createElement('div');
-      actions.className = 'mcp-server-actions';
-
-      const editBtn = document.createElement('button');
-      editBtn.className = 'mcp-server-edit-btn';
-      editBtn.title = 'Edit MCP server configuration';
-      editBtn.textContent = '✎';
-      editBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        showMcpConfigModal(server.name);
-      });
-      actions.appendChild(editBtn);
-
-      const deleteBtn = document.createElement('button');
-      deleteBtn.className = 'mcp-server-delete-btn';
-      deleteBtn.title = 'Delete MCP server configuration';
-      deleteBtn.textContent = '✕';
-      deleteBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (!confirm(`Delete MCP server "${server.name}"?`)) return;
-        try {
-          await call('mcp/config/delete', { name: server.name });
-          state.mcpServers = [];
-          state.mcpServerTools = {};
-          state.mcpExpandedServer = null;
-          loadMcpServers();
-        } catch (err) {
-          showError(`Failed to delete ${server.name}: ${err.message}`);
-        }
-      });
-      actions.appendChild(deleteBtn);
-
-      header.appendChild(actions);
+      header.appendChild(document.createElement('div'));
 
       card.appendChild(header);
 
@@ -439,7 +372,7 @@
                 const desc = prop.description || '';
 
                 const reqClass = isRequired ? 'required' : 'optional';
-                param.innerHTML = `<span class="mcp-tool-param-name">${name}</span> <span class="mcp-tool-param-type">${type}</span><span class="mcp-tool-param-required ${reqClass}">${isRequired ? 'required' : 'optional'}</span>${desc ? '<span class="mcp-tool-param-desc"> — ' + desc + '</span>' : ''}`;
+                param.innerHTML = '<span class="mcp-tool-param-name">' + name + '</span> <span class="mcp-tool-param-type">' + type + '</span><span class="mcp-tool-param-required ' + reqClass + '">' + (isRequired ? 'required' : 'optional') + '</span>' + (desc ? '<span class="mcp-tool-param-desc"> — ' + desc + '</span>' : '');
 
                 params.appendChild(param);
               });
@@ -484,245 +417,6 @@
     loadMcpServers();
   });
 
-  // ── MCP: Import Config ────────────────────────────────────────────────────
-
-  mcpImportBtn.addEventListener('click', async () => {
-    // Send a message to the extension host to open a file dialog
-    vscode.postMessage({ type: 'mcpImportConfig' });
-  });
-
-  // ── MCP Config Editor Modal ────────────────────────────────────────────────
-
-  /**
-   * Show the MCP config editor modal.
-   * @param {string|null} serverName - null for creating new, string for editing existing
-   */
-  function showMcpConfigModal(serverName) {
-    mcpConfigEditingName = serverName;
-    mcpConfigStatus.textContent = '';
-    mcpConfigStatus.className = 'config-status';
-
-    if (serverName) {
-      // Editing existing — find the server config from the stored config
-      mcpConfigModalTitle.textContent = 'Edit MCP Server';
-      mcpConfigDeleteBtn.classList.remove('hidden');
-      loadMcpConfigForEdit(serverName);
-    } else {
-      // Creating new
-      mcpConfigModalTitle.textContent = 'Add MCP Server';
-      mcpConfigDeleteBtn.classList.add('hidden');
-      resetMcpConfigForm();
-    }
-
-    mcpConfigModal.classList.remove('hidden');
-  }
-
-  function hideMcpConfigModal() {
-    mcpConfigModal.classList.add('hidden');
-    mcpConfigEditingName = null;
-  }
-
-  function resetMcpConfigForm() {
-    mcpConfigName.value = '';
-    mcpConfigTransport.value = 'stdio';
-    mcpConfigCommand.value = '';
-    mcpConfigArgs.value = '';
-    mcpConfigUrl.value = '';
-    mcpConfigHeaders.value = '';
-    mcpConfigEnv.value = '';
-    mcpConfigAutostart.checked = true;
-    updateTransportVisibility();
-  }
-
-  function updateTransportVisibility() {
-    const isStdio = mcpConfigTransport.value === 'stdio';
-    mcpConfigCommandGroup.style.display = isStdio ? '' : 'none';
-    mcpConfigArgsGroup.style.display = isStdio ? '' : 'none';
-    mcpConfigUrlGroup.style.display = isStdio ? 'none' : '';
-    mcpConfigHeadersGroup.style.display = isStdio ? 'none' : '';
-  }
-
-  mcpConfigTransport.addEventListener('change', updateTransportVisibility);
-
-  /**
-   * Load an existing server's config from the backend and populate the form.
-   */
-  async function loadMcpConfigForEdit(serverName) {
-    try {
-      const result = await call('mcp/config/get', {});
-      const servers = result.servers || [];
-      const server = servers.find(s => s.name === serverName);
-      if (!server) {
-        showMcpConfigStatus('Server not found in config', 'error');
-        return;
-      }
-
-      mcpConfigName.value = server.name || '';
-      mcpConfigCommand.value = server.command || '';
-      mcpConfigArgs.value = (server.args || []).join('\n');
-      mcpConfigUrl.value = server.url || '';
-      mcpConfigHeaders.value = server.headers ? JSON.stringify(server.headers, null, 2) : '';
-      mcpConfigEnv.value = server.env ? JSON.stringify(server.env, null, 2) : '';
-      mcpConfigAutostart.checked = server.autostart !== false;
-
-      // Determine transport type
-      if (server.url) {
-        mcpConfigTransport.value = 'http';
-      } else {
-        mcpConfigTransport.value = 'stdio';
-      }
-      updateTransportVisibility();
-    } catch (err) {
-      showMcpConfigStatus(`Failed to load config: ${err.message}`, 'error');
-    }
-  }
-
-  function showMcpConfigStatus(message, type) {
-    mcpConfigStatus.textContent = message;
-    mcpConfigStatus.className = 'config-status config-status-' + type;
-    if (type === 'success') {
-      setTimeout(() => {
-        mcpConfigStatus.className = 'config-status';
-      }, 3000);
-    }
-  }
-
-  /**
-   * Save the MCP config from the form (create or update).
-   */
-  async function saveMcpConfig() {
-    const name = mcpConfigName.value.trim();
-    if (!name) {
-      showMcpConfigStatus('Name is required', 'error');
-      return;
-    }
-
-    const isStdio = mcpConfigTransport.value === 'stdio';
-    const params = { name };
-
-    if (isStdio) {
-      const command = mcpConfigCommand.value.trim();
-      if (!command) {
-        showMcpConfigStatus('Command is required for stdio transport', 'error');
-        return;
-      }
-      params.command = command;
-      const argsLines = mcpConfigArgs.value.trim();
-      if (argsLines) {
-        params.args = argsLines.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-      }
-    } else {
-      const url = mcpConfigUrl.value.trim();
-      if (!url) {
-        showMcpConfigStatus('URL is required for HTTP transport', 'error');
-        return;
-      }
-      params.url = url;
-      const headersStr = mcpConfigHeaders.value.trim();
-      if (headersStr) {
-        try {
-          params.headers = JSON.parse(headersStr);
-        } catch (e) {
-          showMcpConfigStatus('Headers must be valid JSON', 'error');
-          return;
-        }
-      }
-    }
-
-    const envStr = mcpConfigEnv.value.trim();
-    if (envStr) {
-      try {
-        params.env = JSON.parse(envStr);
-      } catch (e) {
-        showMcpConfigStatus('Environment variables must be valid JSON', 'error');
-        return;
-      }
-    }
-
-    params.autostart = mcpConfigAutostart.checked;
-
-    mcpConfigSaveBtn.disabled = true;
-    mcpConfigSaveBtn.textContent = 'Saving...';
-
-    try {
-      await call('mcp/config/save', params);
-      showMcpConfigStatus('Configuration saved successfully!', 'success');
-      // Refresh the server list
-      state.mcpServers = [];
-      state.mcpServerTools = {};
-      state.mcpExpandedServer = null;
-      loadMcpServers();
-      // Close modal after a brief delay
-      setTimeout(() => {
-        hideMcpConfigModal();
-      }, 800);
-    } catch (err) {
-      showMcpConfigStatus(`Failed to save: ${err.message}`, 'error');
-    } finally {
-      mcpConfigSaveBtn.disabled = false;
-      mcpConfigSaveBtn.textContent = 'Save';
-    }
-  }
-
-  /**
-   * Delete the currently-edited MCP server config.
-   */
-  async function deleteMcpConfig() {
-    if (!mcpConfigEditingName) {
-      console.error('deleteMcpConfig: mcpConfigEditingName is null');
-      return;
-    }
-
-    const name = mcpConfigName.value.trim() || mcpConfigEditingName;
-    if (!confirm(`Delete MCP server "${name}"?`)) return;
-
-    mcpConfigDeleteBtn.disabled = true;
-    mcpConfigDeleteBtn.textContent = 'Deleting...';
-
-    try {
-      const result = await call('mcp/config/delete', { name });
-      // Check for error in the result (the Rust core may return { error: "..." }
-      // which the extension host wraps as a JSON-RPC error, but just in case)
-      if (result && result.error) {
-        throw new Error(result.error);
-      }
-      showMcpConfigStatus('Deleted successfully!', 'success');
-      // Refresh the server list
-      state.mcpServers = [];
-      state.mcpServerTools = {};
-      state.mcpExpandedServer = null;
-      loadMcpServers();
-      setTimeout(() => {
-        hideMcpConfigModal();
-      }, 800);
-    } catch (err) {
-      console.error('deleteMcpConfig failed:', err);
-      showMcpConfigStatus(`Failed to delete: ${err.message}`, 'error');
-    } finally {
-      mcpConfigDeleteBtn.disabled = false;
-      mcpConfigDeleteBtn.textContent = '🗑 Delete';
-    }
-  }
-
-  // ── MCP Config Modal Event Listeners ──────────────────────────────────────
-
-  mcpAddBtn.addEventListener('click', () => {
-    showMcpConfigModal(null);
-  });
-
-  mcpConfigModalClose.addEventListener('click', hideMcpConfigModal);
-  mcpConfigCancelBtn.addEventListener('click', hideMcpConfigModal);
-
-  // Close modal on overlay click
-  mcpConfigModal.addEventListener('click', (e) => {
-    if (e.target === mcpConfigModal) {
-      hideMcpConfigModal();
-    }
-  });
-
-  mcpConfigSaveBtn.addEventListener('click', saveMcpConfig);
-  mcpConfigDeleteBtn.addEventListener('click', deleteMcpConfig);
-
   // ── Chat Settings Panel ─────────────────────────────────────────────────────
 
   const settingsBtn = document.getElementById('settings-btn');
@@ -741,6 +435,12 @@
   async function loadConfig() {
     try {
       const result = await call('config/getAll', {});
+
+      // Defensive: handle missing or error result
+      if (!result || result.error) {
+        throw new Error(result?.error || 'No response from config backend');
+      }
+
       const config = result.config || {};
 
       // Populate fields from stored values (or keep defaults)
@@ -844,6 +544,21 @@
    */
   function markdownToHtml(md) {
     if (!md) return '';
+
+    // Normalize non-string content to a string before calling .replace()
+    if (typeof md !== 'string') {
+      if (Array.isArray(md)) {
+        md = md.map(function(part) {
+          return typeof part === 'object' && part !== null
+            ? (part.text || part.content || JSON.stringify(part))
+            : String(part);
+        }).join('\n');
+      } else if (typeof md === 'object' && md !== null) {
+        md = md.text || md.content || JSON.stringify(md);
+      } else {
+        md = String(md);
+      }
+    }
 
     // Escape HTML entities first to prevent XSS
     var html = md
@@ -1094,7 +809,7 @@
 
   function renderMessages() {
     // Clear existing messages (keep empty state)
-    const existingMessages = messagesEl.querySelectorAll('.message, .message-system, .message-error');
+    const existingMessages = messagesEl.querySelectorAll('.message-widget');
     existingMessages.forEach(el => el.remove());
 
     if (state.messages.length === 0) {
@@ -1112,42 +827,419 @@
     scrollToBottom();
   }
 
+  /**
+   * Create a DOM element for any message.
+   *
+   * Every message is rendered through the widget dispatch system.
+   * If the message has no explicit widget, a synthetic 'chat-message'
+   * widget is created from the message's role/content/intent/timestamp.
+   *
+   * This ensures a single rendering path for all message types.
+   */
   function createMessageElement(msg) {
-    const div = document.createElement('div');
-
-    if (msg.role === 'system') {
-      div.className = 'message-system';
-      div.textContent = msg.content;
-    } else if (msg.role === 'error') {
-      div.className = 'message-error';
-      div.textContent = msg.content;
-    } else {
-      div.className = `message message-${msg.role === 'user' ? 'user' : 'assistant'}`;
-
-      const role = document.createElement('div');
-      role.className = 'message-role';
-      role.textContent = msg.role === 'user' ? 'You' : 'Spire';
-      div.appendChild(role);
-
-      const content = document.createElement('div');
-      content.className = 'message-content';
-      // Render Markdown for assistant messages, plain text for user messages
-      if (msg.role === 'assistant') {
-        content.innerHTML = markdownToHtml(msg.content);
+    // Normalize content to a string if it's an object/array
+    var contentStr = msg.content;
+    if (contentStr !== null && contentStr !== undefined && typeof contentStr !== 'string') {
+      if (Array.isArray(contentStr)) {
+        contentStr = contentStr.map(function(part) {
+          return typeof part === 'object' && part !== null
+            ? (part.text || part.content || JSON.stringify(part))
+            : String(part);
+        }).join('\n');
+      } else if (typeof contentStr === 'object') {
+        contentStr = contentStr.text || contentStr.content || JSON.stringify(contentStr);
       } else {
-        content.textContent = msg.content;
-      }
-      div.appendChild(content);
-
-      if (msg.timestamp) {
-        const ts = document.createElement('div');
-        ts.className = 'message-timestamp';
-        ts.textContent = formatTime(msg.timestamp);
-        div.appendChild(ts);
+        contentStr = String(contentStr);
       }
     }
 
+    // Normalize: every message gets a widget, even plain chat
+    const widget = msg.widget || {
+      widgetId: msg.id,
+      widgetType: 'chat-message',
+      state: {
+        role: msg.role,
+        content: contentStr,
+        intent: msg.intent,
+        timestamp: msg.timestamp
+      }
+    };
+
+    const container = document.createElement('div');
+    container.className = 'message-widget';
+    container.dataset.widgetId = widget.widgetId;
+    container.dataset.widgetType = widget.widgetType;
+
+    // Render Intent Badge if present at the top of the container
+    if (msg.role === 'assistant' && msg.intent) {
+      const intentBadge = document.createElement('div');
+      intentBadge.className = 'message-intent-badge';
+      const intent = msg.intent;
+      const name = intent.name || 'unknown';
+      const route = intent.route || '';
+      const confidence = intent.confidence || 0;
+      const confidencePct = Math.round(confidence * 100);
+      intentBadge.textContent = '🎯 ' + name + ' (' + route + ', ' + confidencePct + '%)';
+      container.appendChild(intentBadge);
+    }
+
+    // Skip rendering content if it's a plain chat-message and is empty
+    if (widget.widgetType === 'chat-message' && !widget.state.content) {
+      // Don't render empty chat bubbles
+    } else {
+      container.appendChild(renderWidgetContent(widget.widgetType, widget.state));
+    }
+    return container;
+  }
+
+  // ── Widget Rendering ──────────────────────────────────────────────────────
+
+  /**
+   * Create a widget DOM element based on widget type and state.
+   * The element gets data-widget-id and data-widget-type attributes
+   * so it can be found and updated in-place later.
+   */
+  function createWidgetElement(widget) {
+    const container = document.createElement('div');
+    container.className = 'message-widget';
+    container.dataset.widgetId = widget.widgetId;
+    container.dataset.widgetType = widget.widgetType;
+
+    const content = renderWidgetContent(widget.widgetType, widget.state);
+    container.appendChild(content);
+
+    return container;
+  }
+
+  /**
+   * Dispatch to the correct widget renderer based on type.
+   */
+  function renderWidgetContent(widgetType, state) {
+    switch (widgetType) {
+      case 'chat-message':
+        return renderChatMessage(state);
+      case 'build-list':
+        return renderBuildList(state);
+      case 'radio-group':
+        return renderRadioGroup(state);
+      case 'checkbox-list':
+        return renderCheckboxList(state);
+      case 'progress-bar':
+        return renderProgressBar(state);
+      default:
+        const fallback = document.createElement('div');
+        fallback.className = 'widget-unknown';
+        fallback.textContent = 'Unknown widget type: ' + widgetType;
+        return fallback;
+    }
+  }
+
+  // ── Chat Message Widget ───────────────────────────────────────────────────
+
+  /**
+   * Render a normal chat message bubble (user, assistant, system, or error).
+   * This is the default widget type used when no explicit widget is attached.
+   */
+  function renderChatMessage(state) {
+    if (state.role === 'system') {
+      const div = document.createElement('div');
+      div.className = 'message-system';
+      div.textContent = state.content;
+      return div;
+    }
+
+    if (state.role === 'error') {
+      const div = document.createElement('div');
+      div.className = 'message-error';
+      div.textContent = state.content;
+      return div;
+    }
+
+    const div = document.createElement('div');
+    div.className = 'message message-' + (state.role === 'user' ? 'user' : 'assistant');
+
+    const role = document.createElement('div');
+    role.className = 'message-role';
+    role.textContent = state.role === 'user' ? 'You' : 'Spire';
+    div.appendChild(role);
+
+    if (state.content) {
+      const content = document.createElement('div');
+      content.className = 'message-content';
+      // Render Markdown for assistant messages, plain text for user messages
+      if (state.role === 'assistant') {
+        content.innerHTML = markdownToHtml(state.content);
+      } else {
+        content.textContent = state.content;
+      }
+      div.appendChild(content);
+    }
+
+    if (state.timestamp) {
+      const ts = document.createElement('div');
+      ts.className = 'message-timestamp';
+      ts.textContent = formatTime(state.timestamp);
+      div.appendChild(ts);
+    }
+
     return div;
+  }
+
+  // ── Build List Widget ─────────────────────────────────────────────────────
+
+  function renderBuildList(state) {
+    const container = document.createElement('div');
+    container.className = 'widget-build-list';
+
+    // Optional title
+    if (state.title) {
+      const title = document.createElement('div');
+      title.className = 'widget-title';
+      title.textContent = state.title;
+      container.appendChild(title);
+    }
+
+    const builds = state.builds || [];
+    builds.forEach(function(build) {
+      const row = document.createElement('div');
+      row.className = 'build-row build-' + (build.status || 'pending');
+
+      // Status icon
+      const icon = document.createElement('span');
+      icon.className = 'build-icon';
+      icon.textContent = statusIcon(build.status);
+      row.appendChild(icon);
+
+      // Name
+      const name = document.createElement('span');
+      name.className = 'build-name';
+      name.textContent = build.name;
+      row.appendChild(name);
+
+      // Build system type badge
+      if (build.type) {
+        const typeBadge = document.createElement('span');
+        typeBadge.className = 'build-type-badge';
+        typeBadge.textContent = build.type;
+        row.appendChild(typeBadge);
+      }
+
+      // Duration
+      const duration = document.createElement('span');
+      duration.className = 'build-duration';
+      if (build.duration_ms !== null && build.duration_ms !== undefined) {
+        duration.textContent = formatDuration(build.duration_ms);
+      } else if (build.status === 'running') {
+        duration.textContent = '...';
+      } else {
+        duration.textContent = '—';
+      }
+      row.appendChild(duration);
+
+      // Status label
+      const label = document.createElement('span');
+      label.className = 'build-status-label';
+      label.textContent = build.status;
+      row.appendChild(label);
+
+      // Click to expand/collapse build log
+      if (build.log) {
+        const logSection = document.createElement('div');
+        logSection.className = 'build-log';
+        logSection.textContent = build.log;
+
+        row.addEventListener('click', function() {
+          logSection.classList.toggle('expanded');
+        });
+
+        container.appendChild(row);
+        container.appendChild(logSection);
+      } else {
+        container.appendChild(row);
+      }
+    });
+
+    return container;
+  }
+
+  /** Map build status to a unicode icon */
+  function statusIcon(status) {
+    switch (status) {
+      case 'success': return '✓';
+      case 'running': return '⏳';
+      case 'error':   return '✗';
+      case 'skipped': return '–';
+      default:        return '○';  // pending
+    }
+  }
+
+  /** Format milliseconds to human-readable */
+  function formatDuration(ms) {
+    if (ms < 1000) return ms + 'ms';
+    if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+    return (ms / 60000).toFixed(1) + 'm';
+  }
+
+  // ── Radio Group Widget ────────────────────────────────────────────────────
+
+  function renderRadioGroup(state) {
+    const container = document.createElement('div');
+    container.className = 'widget-radio-group';
+
+    if (state.label) {
+      const label = document.createElement('div');
+      label.className = 'widget-label';
+      label.textContent = state.label;
+      container.appendChild(label);
+    }
+
+    const options = state.options || [];
+    options.forEach(function(opt) {
+      const optionRow = document.createElement('div');
+      optionRow.className = 'widget-option';
+      if (opt.disabled) {
+        optionRow.classList.add('disabled');
+      }
+      if (state.selected === opt.value) {
+        optionRow.classList.add('selected');
+      }
+
+      const radio = document.createElement('span');
+      radio.className = 'widget-radio';
+      radio.textContent = state.selected === opt.value ? '●' : '○';
+      optionRow.appendChild(radio);
+
+      const label = document.createElement('span');
+      label.className = 'widget-option-label';
+      label.textContent = opt.label;
+      optionRow.appendChild(label);
+
+      if (!opt.disabled) {
+        optionRow.addEventListener('click', function() {
+          handleWidgetInteraction(container.closest('[data-widget-id]').dataset.widgetId, opt.value);
+        });
+      }
+
+      container.appendChild(optionRow);
+    });
+
+    return container;
+  }
+
+  // ── Checkbox List Widget ──────────────────────────────────────────────────
+
+  function renderCheckboxList(state) {
+    const container = document.createElement('div');
+    container.className = 'widget-checkbox-list';
+
+    if (state.label) {
+      const label = document.createElement('div');
+      label.className = 'widget-label';
+      label.textContent = state.label;
+      container.appendChild(label);
+    }
+
+    const options = state.options || [];
+    const selected = state.selected || [];
+    options.forEach(function(opt) {
+      const optionRow = document.createElement('div');
+      optionRow.className = 'widget-option';
+      if (selected.indexOf(opt.value) !== -1) {
+        optionRow.classList.add('selected');
+      }
+
+      const checkbox = document.createElement('span');
+      checkbox.className = 'widget-checkbox';
+      checkbox.textContent = selected.indexOf(opt.value) !== -1 ? '☑' : '☐';
+      optionRow.appendChild(checkbox);
+
+      const label = document.createElement('span');
+      label.className = 'widget-option-label';
+      label.textContent = opt.label;
+      optionRow.appendChild(label);
+
+      optionRow.addEventListener('click', function() {
+        handleWidgetInteraction(container.closest('[data-widget-id]').dataset.widgetId, opt.value);
+      });
+
+      container.appendChild(optionRow);
+    });
+
+    return container;
+  }
+
+  // ── Progress Bar Widget ───────────────────────────────────────────────────
+
+  function renderProgressBar(state) {
+    const container = document.createElement('div');
+    container.className = 'widget-progress-bar';
+
+    if (state.label) {
+      const label = document.createElement('div');
+      label.className = 'widget-label';
+      label.textContent = state.label;
+      container.appendChild(label);
+    }
+
+    const track = document.createElement('div');
+    track.className = 'progress-track';
+
+    const fill = document.createElement('div');
+    fill.className = 'progress-fill';
+    var value = typeof state.value === 'number' ? state.value : 0;
+    fill.style.width = Math.min(100, Math.max(0, value)) + '%';
+
+    if (state.status === 'error') {
+      fill.classList.add('progress-error');
+    } else if (state.status === 'success') {
+      fill.classList.add('progress-success');
+    }
+
+    track.appendChild(fill);
+    container.appendChild(track);
+
+    const pct = document.createElement('div');
+    pct.className = 'progress-percent';
+    pct.textContent = value + '%';
+    container.appendChild(pct);
+
+    return container;
+  }
+
+  // ── Widget Interaction ────────────────────────────────────────────────────
+
+  /**
+   * Called when a user interacts with a widget (clicks a radio option, checkbox, etc.).
+   * Sends a JSON-RPC call to the extension host which forwards to the backend.
+   */
+  function handleWidgetInteraction(widgetId, value) {
+    if (!state.connected) return;
+    call('widget/interact', { widgetId, value }).catch(function(err) {
+      showError('Widget interaction failed: ' + err.message);
+    });
+  }
+
+  /**
+   * Update a widget's state in-place (called when event/widget/update arrives).
+   * Finds the widget DOM element by data-widget-id and re-renders its content.
+   */
+  function updateWidgetInPlace(widgetId, newState) {
+    const el = document.querySelector('[data-widget-id="' + widgetId + '"]');
+    if (!el) return;
+
+    const widgetType = el.dataset.widgetType;
+    // Clear and re-render just the content
+    el.innerHTML = '';
+    el.appendChild(renderWidgetContent(widgetType, newState));
+
+    // Also update the message in state so it persists across reloads
+    for (var i = 0; i < state.messages.length; i++) {
+      var msg = state.messages[i];
+      if (msg.widget && msg.widget.widgetId === widgetId) {
+        msg.widget.state = newState;
+        break;
+      }
+    }
   }
 
   function addMessage(msg) {
@@ -1203,6 +1295,60 @@
     }
   }
 
+  // ── Build Progress (shown as italic system messages in chat) ──────────────
+
+  /**
+   * Show or update a build progress message in the chat area.
+   * The message appears as an italicized system message.
+   * When the build completes, the message updates to "build complete".
+   */
+  function showBuildProgress(message) {
+    // Determine if this is a completion/final message
+    const isComplete = /complete|done|finished|success/i.test(message);
+
+    // If we already have a build progress message element, update it
+    if (state.buildProgressMessageId) {
+      const existingEl = document.getElementById(state.buildProgressMessageId);
+      if (existingEl) {
+        existingEl.textContent = message;
+        if (isComplete) {
+          existingEl.classList.remove('build-progress');
+          existingEl.classList.add('build-complete');
+        }
+        return;
+      }
+    }
+
+    // Create a new build progress message
+    const id = 'build-progress-' + Date.now();
+    state.buildProgressMessageId = id;
+
+    const div = document.createElement('div');
+    div.id = id;
+    div.className = isComplete ? 'message-system build-complete' : 'message-system build-progress';
+    div.textContent = message;
+
+    // Insert before the typing indicator if it's visible, otherwise append
+    if (!typingIndicator.classList.contains('hidden')) {
+      messagesEl.insertBefore(div, typingIndicator);
+    } else {
+      messagesEl.appendChild(div);
+    }
+
+    scrollToBottom();
+  }
+
+  /**
+   * Clear the build progress message from the chat area.
+   */
+  function clearBuildProgress() {
+    if (state.buildProgressMessageId) {
+      const el = document.getElementById(state.buildProgressMessageId);
+      if (el) el.remove();
+      state.buildProgressMessageId = null;
+    }
+  }
+
   // ── Chat Actions ──────────────────────────────────────────────────────────
 
   async function sendMessage() {
@@ -1231,9 +1377,25 @@
         options: { role: 'user' },
       });
 
-      // Send the prompt to DeepSeek via llm/complete
-      const llmResult = await call('llm/complete', { prompt: text });
+      // Send the full conversation to DeepSeek via llm/complete
+      // Include the full messages array so the LLM has conversation context
+      const conversationMessages = state.messages.map(msg => ({
+        id: msg.id || `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role: msg.role,
+        content: msg.content,
+        timestamp: msg.timestamp || new Date().toISOString(),
+      }));
+      const llmResult = await call('llm/complete', { messages: conversationMessages });
+
+      // Check for error responses from the LLM (e.g. missing API key)
+      if (llmResult?.error) {
+        throw new Error(llmResult.error);
+      }
+
       const reply = llmResult?.content || '';
+
+      // Extract intent info from the response (if present)
+      const intentInfo = llmResult?.intent || null;
 
       // Store the assistant reply
       await call('chat/append', {
@@ -1247,6 +1409,7 @@
         role: 'assistant',
         content: reply,
         timestamp: new Date().toISOString(),
+        intent: intentInfo,
       });
     } catch (err) {
       showError(`Failed to send message: ${err.message}`);
@@ -1333,23 +1496,179 @@
 
   sendBtn.addEventListener('click', sendMessage);
 
-  // Chat header buttons (moved into tab-toolbar for chat)
-  // We add them dynamically since the header was replaced by the tab bar
-  const chatToolbar = document.createElement('div');
-  chatToolbar.className = 'tab-toolbar';
-  chatToolbar.innerHTML = `
-    <span class="tab-toolbar-title">Chat</span>
-    <div style="display:flex;gap:4px">
-      <button class="header-btn" id="clear-btn" title="Clear conversation">🗑 Clear</button>
-      <button class="header-btn" id="new-chat-btn" title="New chat">✚ New</button>
-    </div>
-  `;
-  const tabChat = document.getElementById('tab-chat');
-  tabChat.insertBefore(chatToolbar, tabChat.firstChild);
-
-  // Re-bind chat buttons
+  // Chat header buttons — bound to the statically-defined toolbar in index.html
   document.getElementById('clear-btn').addEventListener('click', clearChat);
   document.getElementById('new-chat-btn').addEventListener('click', newChat);
+
+  // ── Project Tab (read-only project analysis) ──────────────────────────────
+
+  const projectContent = document.getElementById('project-content');
+  const projectEmptyState = document.getElementById('project-empty-state');
+  const projectRefreshBtn = document.getElementById('project-refresh-btn');
+
+  /**
+   * Load project analysis data from the core subprocess.
+   */
+  async function loadProjectAnalysis() {
+    // Show loading state
+    projectContent.innerHTML = '';
+    const loading = document.createElement('div');
+    loading.className = 'empty-state';
+    loading.innerHTML = '<div class="empty-state-icon">📊</div><div class="empty-state-text">Loading...</div><div class="empty-state-hint">Fetching project analysis...</div>';
+    projectContent.appendChild(loading);
+
+    try {
+      const analysis = await call('project/analysis', {});
+      renderProjectAnalysis(analysis);
+    } catch (err) {
+      projectContent.innerHTML = '';
+      const error = document.createElement('div');
+      error.className = 'empty-state';
+      error.innerHTML = '<div class="empty-state-icon">⚠️</div><div class="empty-state-text">Failed to load</div><div class="empty-state-hint">' + err.message + '</div>';
+      projectContent.appendChild(error);
+    }
+  }
+
+  /**
+   * Render the project analysis data as a read-only view.
+   */
+  function renderProjectAnalysis(analysis) {
+    projectContent.innerHTML = '';
+
+    if (!analysis) {
+      projectContent.appendChild(projectEmptyState);
+      return;
+    }
+
+    // ── Overview section ──
+    if (analysis.overview) {
+      const overview = document.createElement('div');
+      overview.className = 'project-section';
+
+      const title = document.createElement('div');
+      title.className = 'project-section-title';
+      title.textContent = 'Overview';
+      overview.appendChild(title);
+
+      const table = document.createElement('div');
+      table.className = 'project-info-table';
+
+      addInfoRow(table, 'Project', analysis.overview.name || '-');
+      addInfoRow(table, 'Root', analysis.overview.root || '-');
+      addInfoRow(table, 'Language', analysis.overview.language || '-');
+      addInfoRow(table, 'Build System', analysis.overview.build_system || '-');
+      addInfoRow(table, 'Files', String(analysis.overview.file_count ?? '-'));
+      addInfoRow(table, 'Lines of Code', String(analysis.overview.loc ?? '-'));
+
+      overview.appendChild(table);
+      projectContent.appendChild(overview);
+    }
+
+    // ── Dependencies section ──
+    if (analysis.dependencies && analysis.dependencies.length > 0) {
+      const deps = document.createElement('div');
+      deps.className = 'project-section';
+
+      const title = document.createElement('div');
+      title.className = 'project-section-title';
+      title.textContent = 'Dependencies (' + analysis.dependencies.length + ')';
+      deps.appendChild(title);
+
+      const list = document.createElement('div');
+      list.className = 'project-dependency-list';
+
+      analysis.dependencies.forEach(function(dep) {
+        const item = document.createElement('div');
+        item.className = 'project-dependency-item';
+        item.textContent = dep.name + (dep.version ? ' ' + dep.version : '');
+        list.appendChild(item);
+      });
+
+      deps.appendChild(list);
+      projectContent.appendChild(deps);
+    }
+
+    // ── Modules / Packages section ──
+    if (analysis.modules && analysis.modules.length > 0) {
+      const mods = document.createElement('div');
+      mods.className = 'project-section';
+
+      const title = document.createElement('div');
+      title.className = 'project-section-title';
+      title.textContent = 'Modules (' + analysis.modules.length + ')';
+      mods.appendChild(title);
+
+      const list = document.createElement('div');
+      list.className = 'project-module-list';
+
+      analysis.modules.forEach(function(mod) {
+        const item = document.createElement('div');
+        item.className = 'project-module-item';
+        item.textContent = mod.name || mod.path || '-';
+        list.appendChild(item);
+      });
+
+      mods.appendChild(list);
+      projectContent.appendChild(mods);
+    }
+
+    // ── Build targets section ──
+    if (analysis.build_targets && analysis.build_targets.length > 0) {
+      const targets = document.createElement('div');
+      targets.className = 'project-section';
+
+      const title = document.createElement('div');
+      title.className = 'project-section-title';
+      title.textContent = 'Build Targets (' + analysis.build_targets.length + ')';
+      targets.appendChild(title);
+
+      const list = document.createElement('div');
+      list.className = 'project-target-list';
+
+      analysis.build_targets.forEach(function(target) {
+        const item = document.createElement('div');
+        item.className = 'project-target-item';
+        item.textContent = target.name + (target.kind ? ' (' + target.kind + ')' : '');
+        list.appendChild(item);
+      });
+
+      targets.appendChild(list);
+      projectContent.appendChild(targets);
+    }
+
+    // ── Fallback if no sections rendered ──
+    if (projectContent.children.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-state';
+      empty.innerHTML = '<div class="empty-state-icon">📊</div><div class="empty-state-text">No analysis data</div><div class="empty-state-hint">Project analysis returned no data</div>';
+      projectContent.appendChild(empty);
+    }
+  }
+
+  /**
+   * Helper: add a key-value row to an info table.
+   */
+  function addInfoRow(table, label, value) {
+    const row = document.createElement('div');
+    row.className = 'project-info-row';
+
+    const labelEl = document.createElement('span');
+    labelEl.className = 'project-info-label';
+    labelEl.textContent = label;
+
+    const valueEl = document.createElement('span');
+    valueEl.className = 'project-info-value';
+    valueEl.textContent = value;
+
+    row.appendChild(labelEl);
+    row.appendChild(valueEl);
+    table.appendChild(row);
+  }
+
+  // Project refresh button
+  projectRefreshBtn.addEventListener('click', function() {
+    loadProjectAnalysis();
+  });
 
   // ── Tools Tab (real-time tool usage feed) ─────────────────────────────────
 
@@ -1467,11 +1786,6 @@
         if (msg.connected) {
           setConnected(true);
           loadChat();
-          // Do NOT dismiss the startup overlay here — the overlay is dismissed
-          // only when the Rust core sends event/system/progress with percent=100,
-          // which happens after the full initialization sequence completes.
-          // Dismissing on TCP connection alone would hide the overlay before
-          // the embedder download, graph init, project sync, etc. have finished.
         } else {
           setConnected(false);
         }
@@ -1497,26 +1811,37 @@
       case 'notification':
         // Handle server-pushed notifications
         if (msg.method === 'event/chat/message') {
-          const message = msg.params?.message;
-          if (message) {
+          const params = msg.params || {};
+          // Support both { message: { role, content, widget } } and { content, role, widget } formats
+          const message = params.message || params;
+          if (message && message.content) {
             showTyping(false);
             state.isProcessing = false;
             sendBtn.disabled = !state.connected;
-            addMessage(message);
+            addMessage({
+              role: message.role || 'assistant',
+              content: message.content,
+              timestamp: message.timestamp || new Date().toISOString(),
+              intent: message.intent || null,
+              widget: message.widget || null,
+            });
+          }
+        } else if (msg.method === 'event/widget/update') {
+          // Update a widget's state in-place (e.g. build-list gets updated with real results)
+          const params = msg.params || {};
+          const widgetId = params.widgetId;
+          const newState = params.state;
+          if (widgetId && newState) {
+            updateWidgetInPlace(widgetId, newState);
           }
         } else if (msg.method === 'event/system/progress') {
-          // Handle startup progress — hide overlay when complete
+
           const params = msg.params || {};
-          const percent = params.percent;
           const message = params.message;
 
           if (message) {
-            startupStatus.textContent = message;
-          }
-
-          // When we hit 100%, complete the startup
-          if (percent === 100) {
-            completeStartup();
+            // Show build progress as an italic system message in the chat area
+            showBuildProgress(message);
           }
         } else if (msg.method === 'event/tool/start') {
           // Tool execution started
@@ -1562,12 +1887,6 @@
             existing.error = p.error;
             renderToolEvents();
           }
-        } else if (msg.method === 'event/mcp/config/imported') {
-          // MCP config was imported — refresh the server list
-          state.mcpServers = [];
-          state.mcpServerTools = {};
-          state.mcpExpandedServer = null;
-          loadMcpServers();
         }
         break;
 
@@ -1577,15 +1896,6 @@
         showTyping(false);
         state.isProcessing = false;
         sendBtn.disabled = !state.connected;
-        break;
-
-      case 'initStatus':
-        // The extension host tells us whether the core has finished initializing.
-        // If complete, hide the overlay immediately (e.g. sidebar re-activation
-        // in the same VS Code session where init already finished).
-        if (msg.complete) {
-          completeStartup();
-        }
         break;
 
       case 'ready':

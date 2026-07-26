@@ -5,13 +5,19 @@
 //!
 //! This actor stores registered tools and handles tool invocation requests.
 //! Tools can be registered from external MCP servers or from the VS Code extension.
+//!
+//! Routing is handled by the `ToolRouterActor`, which holds senders to all
+//! tool backends (extension, embedded, MCP) and routes tool calls by prefix
+//! matching. This replaces the previous `ToolDispatcher` + `ToolProvider` pattern.
 
 use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 
-use crate::actors::{Actor, ActorError, ToolInfo, vscode_tool_definitions};
-use crate::actors::project_query::ProjectQueryActor;
+use crate::actors::{Actor, ActorError, ToolInfo};
+use crate::actors::tool_providers::ToolRouterMessage;
+
 
 /// A registered tool with its handler.
 pub struct RegisteredTool {
@@ -52,39 +58,19 @@ pub enum ToolsMessage {
 /// Actor that manages tool registration and dispatch.
 pub struct ToolsActor {
     tools: HashMap<String, RegisteredTool>,
+    /// Sender to the ToolRouterActor for routing tool calls.
+    tool_router_tx: mpsc::Sender<ToolRouterMessage>,
 }
 
 impl ToolsActor {
-    pub fn new() -> Self {
-        let mut tools = HashMap::new();
-
-        // Register all VS Code extension tools at startup
-        for tool_info in vscode_tool_definitions() {
-            tools.insert(tool_info.name.clone(), RegisteredTool {
-                info: tool_info,
-                server: "vscode-extension".to_string(),
-            });
-        }
-
-        // Register all project query tools (memory graph queries) at startup
-        for tool_info in ProjectQueryActor::tool_definitions() {
-            tools.insert(tool_info.name.clone(), RegisteredTool {
-                info: tool_info,
-                server: "spire-core".to_string(),
-            });
-        }
-
+    pub fn new(tool_router_tx: mpsc::Sender<ToolRouterMessage>) -> Self {
         Self {
-            tools,
+            tools: HashMap::new(),
+            tool_router_tx,
         }
     }
 }
 
-impl Default for ToolsActor {
-    fn default() -> Self {
-        Self::new()
-    }
-}
 
 #[async_trait]
 impl Actor for ToolsActor {
@@ -108,24 +94,30 @@ impl Actor for ToolsActor {
                 let _ = reply_to.send(Ok(()));
             }
             ToolsMessage::ListTools { reply_to } => {
-                let tools: Vec<ToolInfo> = self.tools.values().map(|t| t.info.clone()).collect();
-                let _ = reply_to.send(tools);
+                // Use the ToolRouterActor to get all tools from all backends
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if self.tool_router_tx
+                    .send(ToolRouterMessage::ListTools { reply_to: tx })
+                    .await
+                    .is_ok()
+                {
+                    let tools = rx.await.unwrap_or_default();
+                    let _ = reply_to.send(tools);
+                } else {
+                    let _ = reply_to.send(vec![]);
+                }
             }
             ToolsMessage::CallTool {
                 tool,
                 args,
                 reply_to,
             } => {
-                let result = self.call_tool(&tool, args);
+                let result = self.call_tool(&tool, args).await;
                 let _ = reply_to.send(result);
             }
             ToolsMessage::RegisterVscodeTools { reply_to } => {
-                for tool_info in vscode_tool_definitions() {
-                    self.tools.insert(tool_info.name.clone(), RegisteredTool {
-                        info: tool_info,
-                        server: "vscode-extension".to_string(),
-                    });
-                }
+                // VS Code tools are already registered via the ExtensionToolProvider
+                // in the ToolRouterActor. This message is kept for backward compatibility.
                 let _ = reply_to.send(Ok(()));
             }
         }
@@ -133,29 +125,23 @@ impl Actor for ToolsActor {
 }
 
 impl ToolsActor {
-    fn call_tool(&self, tool_name: &str, _args: Value) -> Result<Value, ActorError> {
-        let tool = self.tools.get(tool_name)
-            .ok_or_else(|| ActorError::ToolNotFound(tool_name.to_string()))?;
-
-        // If this is a VS Code extension tool, return a special response
-        // that tells the coordinator to forward the call to the extension.
-        if tool.server == "vscode-extension" {
-            return Err(ActorError::Internal(format!(
-                "Tool '{}' is provided by vscode-extension — coordinator must forward it", tool_name
-            )));
+    async fn call_tool(&self, tool_name: &str, args: Value) -> Result<Value, ActorError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.tool_router_tx
+            .send(ToolRouterMessage::CallTool {
+                tool_name: tool_name.to_string(),
+                args,
+                reply_to: tx,
+            })
+            .await
+            .is_err()
+        {
+            return Err(ActorError::Internal("ToolRouter actor not available".to_string()));
         }
-
-        // If this is a project query tool (memory graph), tell the coordinator
-        // to forward the call to the ProjectQueryActor.
-        if tool.server == "spire-core" {
-            return Err(ActorError::Internal(format!(
-                "Tool '{}' is provided by spire-core — coordinator must forward it to ProjectQueryActor", tool_name
-            )));
+        match rx.await {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(e)) => Err(ActorError::Internal(e)),
+            Err(_) => Err(ActorError::Internal("ToolRouter response error".to_string())),
         }
-
-        // External MCP tools are dispatched by the MCP client actor.
-        Err(ActorError::Internal(format!(
-            "Tool '{}' is provided by '{}' — dispatch must go through MCP client actor", tool_name, tool.server
-        )))
     }
 }

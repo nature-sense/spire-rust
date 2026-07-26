@@ -405,7 +405,7 @@ fn build_tree(root: &Path, current: &Path) -> Result<DirectoryTreeEntry> {
 
             match build_tree(root, &child_path) {
                 Ok(child_entry) => children.push(child_entry),
-                Err(_e) => {
+                Err(e) => {
                     // Include error info as a leaf entry
                     children.push(DirectoryTreeEntry {
                         name: child_path

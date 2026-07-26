@@ -21,6 +21,77 @@ export interface ChatMessage {
   toolResults?: ToolResult[];
   isStreaming?: boolean;
   metadata?: Record<string, unknown>;
+  widget?: ChatWidget;  // NEW: embedded interactive widget
+}
+
+// ──────────────────────────────────────────────
+// 1b. CHAT WIDGETS (interactive display components)
+// ──────────────────────────────────────────────
+
+export type WidgetType = 'chat-message' | 'build-list' | 'radio-group' | 'checkbox-list' | 'progress-bar';
+
+export interface ChatWidget {
+  widgetId: string;
+  widgetType: WidgetType;
+  state: Record<string, unknown>;
+}
+
+// ── Build list widget ─────────────────────────
+
+export interface BuildListState {
+  title?: string;
+  builds: BuildItem[];
+}
+
+export interface BuildItem {
+  name: string;
+  status: 'pending' | 'running' | 'success' | 'error' | 'skipped';
+  duration_ms?: number;
+  log?: string;
+}
+
+// ── Radio group widget ────────────────────────
+
+export interface RadioGroupState {
+  label?: string;
+  options: RadioOption[];
+  selected: string | null;
+}
+
+export interface RadioOption {
+  value: string;
+  label: string;
+  disabled?: boolean;
+}
+
+// ── Checkbox list widget ──────────────────────
+
+export interface CheckboxListState {
+  label?: string;
+  options: CheckboxOption[];
+  selected: string[];
+}
+
+export interface CheckboxOption {
+  value: string;
+  label: string;
+}
+
+// ── Chat message widget (default for plain text messages) ──
+
+export interface ChatMessageState {
+  role: 'user' | 'assistant' | 'system' | 'error';
+  content: string;
+  intent?: { name: string; route: string; confidence: number };
+  timestamp?: string;
+}
+
+// ── Progress bar widget ───────────────────────
+
+export interface ProgressBarState {
+  label?: string;
+  value: number;   // 0–100
+  status?: 'running' | 'success' | 'error';
 }
 
 export interface ToolCallInvocation {

@@ -19,6 +19,9 @@ pub struct ChatMessageData {
     pub role: String,
     pub content: String,
     pub timestamp: String,
+    /// Optional embedded widget (build-list, radio-group, checkbox-list, progress-bar).
+    /// Stored as opaque JSON so the frontend drives rendering.
+    pub widget: Option<serde_json::Value>,
 }
 
 /// A chat dialog.
@@ -46,6 +49,7 @@ pub enum ChatMessage {
         chat_id: String,
         content: String,
         role: String,
+        widget: Option<serde_json::Value>,
         reply_to: tokio::sync::oneshot::Sender<Result<ChatMessageData, ActorError>>,
     },
     /// Clear all messages in a chat dialog.
@@ -57,6 +61,12 @@ pub enum ChatMessage {
     SetTitle {
         chat_id: String,
         title: String,
+        reply_to: tokio::sync::oneshot::Sender<Result<(), ActorError>>,
+    },
+    /// Update the state of a widget embedded in a message.
+    UpdateWidget {
+        widget_id: String,
+        state: serde_json::Value,
         reply_to: tokio::sync::oneshot::Sender<Result<(), ActorError>>,
     },
 }
@@ -110,9 +120,10 @@ impl Actor for ChatActor {
                 chat_id,
                 content,
                 role,
+                widget,
                 reply_to,
             } => {
-                let result = self.append_message(&chat_id, &content, &role);
+                let result = self.append_message(&chat_id, &content, &role, widget);
                 let _ = reply_to.send(result);
             }
             ChatMessage::Clear { chat_id, reply_to } => {
@@ -133,6 +144,10 @@ impl Actor for ChatActor {
                     let _ = reply_to.send(Err(ActorError::Internal(format!("Chat not found: {}", chat_id))));
                 }
             }
+            ChatMessage::UpdateWidget { widget_id, state, reply_to } => {
+                let result = self.update_widget(&widget_id, state);
+                let _ = reply_to.send(result);
+            }
         }
     }
 }
@@ -143,6 +158,7 @@ impl ChatActor {
         chat_id: &str,
         content: &str,
         role: &str,
+        widget: Option<serde_json::Value>,
     ) -> Result<ChatMessageData, ActorError> {
         let dialog = self.dialogs.get_mut(chat_id)
             .ok_or_else(|| ActorError::Internal(format!("Chat not found: {}", chat_id)))?;
@@ -152,11 +168,38 @@ impl ChatActor {
             role: role.to_string(),
             content: content.to_string(),
             timestamp: Utc::now().to_rfc3339(),
+            widget,
         };
 
         dialog.messages.push(message.clone());
         dialog.updated_at = Utc::now().to_rfc3339();
 
         Ok(message)
+    }
+
+    /// Update the state of a widget by finding the message that contains it.
+    /// The widget_id is matched against the "widgetId" field inside the widget JSON.
+    fn update_widget(
+        &mut self,
+        widget_id: &str,
+        new_state: serde_json::Value,
+    ) -> Result<(), ActorError> {
+        for dialog in self.dialogs.values_mut() {
+            for msg in &mut dialog.messages {
+                if let Some(ref mut widget) = msg.widget {
+                    if let Some(current_id) = widget.get("widgetId").and_then(|v| v.as_str()) {
+                        if current_id == widget_id {
+                            // Update the "state" field inside the widget JSON
+                            if let Some(obj) = widget.as_object_mut() {
+                                obj.insert("state".to_string(), new_state.clone());
+                            }
+                            dialog.updated_at = Utc::now().to_rfc3339();
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        Err(ActorError::Internal(format!("Widget not found: {}", widget_id)))
     }
 }

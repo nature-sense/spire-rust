@@ -23,9 +23,32 @@ use rust_mcp_sdk::ClientStreamableTransport;
 use rust_mcp_sdk::StreamableTransportOptions;
 use rust_mcp_sdk::RequestOptions;
 use std::collections::HashMap;
+
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use rust_mcp_sdk::schema::RpcError;
+
+// ---------------------------------------------------------------------------
+// BuildSystemInfo — self-description from MCP servers that can build projects
+// ---------------------------------------------------------------------------
+
+/// Metadata returned by a build MCP server's `_build_system` tool.
+/// Describes what build systems this server supports and what it can do.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BuildSystemInfo {
+    /// Server identifier (e.g. "mcp-cargo")
+    pub name: String,
+    /// Build system names this server handles (e.g. ["Cargo"])
+    pub build_systems: Vec<String>,
+    /// High-level project type (e.g. "rust", "node", "python")
+    pub build_type: String,
+    /// Standard tool capabilities (e.g. "build", "test", "clean", "check")
+    pub capabilities: Vec<String>,
+    /// Name of the analyze tool, if any
+    pub analyzer_tool: Option<String>,
+    /// Config file patterns this server can parse
+    pub config_files: Vec<String>,
+}
 
 /// Generic transport configuration for connecting to an MCP server.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -69,6 +92,8 @@ struct McpClientConnection {
     runtime: Arc<dyn McpClient>,
     server_info: InitializeResult,
     tools: Vec<Tool>,
+    /// Build system metadata, if the server exposes a `_build_system` tool.
+    build_system: Option<BuildSystemInfo>,
 }
 
 /// Manages connections to external MCP servers.
@@ -137,6 +162,7 @@ impl McpClientManager {
                         meta: None,
                     },
                     tools: vec![],
+                    build_system: None,
                 });
         }
     }
@@ -164,11 +190,16 @@ impl McpClientManager {
                     meta: None,
                 },
                 tools: vec![],
+                build_system: None,
             },
         );
     }
 
     /// Connect to all configured servers.
+    ///
+    /// Each server connection has a 15-second timeout. If a server subprocess
+    /// hangs during initialization, it will be skipped so other servers can
+    /// still connect.
     pub async fn connect_all(&mut self) {
         let names: Vec<String> = self.connections.keys().cloned().collect();
         for name in names {
@@ -181,8 +212,25 @@ impl McpClientManager {
                     continue;
                 }
             }
-            if let Err(e) = self.connect(&name).await {
-                error!("MCP Client: failed to connect to '{}': {:#}", name, e);
+            let name_clone = name.clone();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                self.connect(&name_clone),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    info!("MCP Client: connected to '{}'", name_clone);
+                }
+                Ok(Err(e)) => {
+                    error!("MCP Client: failed to connect to '{}': {:#}", name_clone, e);
+                }
+                Err(_) => {
+                    warn!(
+                        "MCP Client: timed out connecting to '{}' after 15s, skipping",
+                        name_clone
+                    );
+                }
             }
         }
     }
@@ -220,10 +268,17 @@ impl McpClientManager {
                     args.join(" ")
                 );
 
+                // Inject SPIRE_LOG_DIR into the subprocess environment so that
+                // MCP servers can write their own log files.
+                let mut merged_env = env.clone();
+                if let Ok(log_dir) = std::env::var("SPIRE_LOG_DIR") {
+                    merged_env.insert("SPIRE_LOG_DIR".to_string(), log_dir);
+                }
+
                 let transport = StdioTransport::create_with_server_launch(
                     command.clone(),
                     args.clone(),
-                    Some(env.clone()),
+                    Some(merged_env),
                     TransportOptions::default(),
                 )
                 .map_err(|e| anyhow::anyhow!("Failed to create stdio transport for '{}': {}", server_name, e))?;
@@ -274,9 +329,15 @@ impl McpClientManager {
             }
         };
 
-        runtime.clone().start().await.map_err(|e| {
-            anyhow::anyhow!("Failed to start MCP client for '{}': {}", server_name, e)
-        })?;
+        // Apply a 15-second timeout to the start() call to prevent hanging
+        // if the subprocess doesn't respond during initialization.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            runtime.clone().start(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Timed out starting MCP client for '{}' after 15s", server_name))?
+        .map_err(|e| anyhow::anyhow!("Failed to start MCP client for '{}': {}", server_name, e))?;
 
         let server_info = runtime
             .server_info()
@@ -290,8 +351,13 @@ impl McpClientManager {
         );
 
         let tools = if server_info.capabilities.tools.is_some() {
-            match runtime.request_tool_list(None).await {
-                Ok(list) => {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                runtime.request_tool_list(None),
+            )
+            .await
+            {
+                Ok(Ok(list)) => {
                     info!(
                         "MCP Client: '{}' exposes {} tools",
                         server_name,
@@ -299,16 +365,79 @@ impl McpClientManager {
                     );
                     list.tools
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     warn!(
                         "MCP Client: failed to list tools for '{}': {}",
                         server_name, e
                     );
                     vec![]
                 }
+                Err(_) => {
+                    warn!(
+                        "MCP Client: timed out listing tools for '{}' after 10s",
+                        server_name
+                    );
+                    vec![]
+                }
             }
         } else {
             vec![]
+        };
+
+        // Discover build system metadata via the `_build_system` tool convention.
+        // If the server exposes this tool, call it once and store the result.
+        let build_system = if tools.iter().any(|t| t.name == "_build_system") {
+            info!("MCP Client: '{}' exposes _build_system tool, querying...", server_name);
+            match runtime
+                .request_tool_call(CallToolRequestParams {
+                    name: "_build_system".into(),
+                    arguments: None,
+                    meta: None,
+                    task: None,
+                })
+                .await
+            {
+                Ok(result) => {
+                    // Parse the first text content as JSON
+                    let text = result
+                        .content
+                        .iter()
+                        .filter_map(|c| {
+                            if let rust_mcp_sdk::schema::ContentBlock::TextContent(tc) = c {
+                                Some(tc.text.clone())
+                            } else {
+                                None
+                            }
+                        })
+                        .next()
+                        .unwrap_or_default();
+                    match serde_json::from_str::<BuildSystemInfo>(&text) {
+                        Ok(info) => {
+                            info!(
+                                "MCP Client: '{}' build system info: {:?}",
+                                server_name, info.build_systems
+                            );
+                            Some(info)
+                        }
+                        Err(e) => {
+                            warn!(
+                                "MCP Client: failed to parse _build_system response from '{}': {}",
+                                server_name, e
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "MCP Client: failed to call _build_system on '{}': {}",
+                        server_name, e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
         };
 
         self.connections.insert(
@@ -318,6 +447,7 @@ impl McpClientManager {
                 runtime,
                 server_info,
                 tools,
+                build_system,
             },
         );
 
@@ -358,6 +488,23 @@ impl McpClientManager {
             .map(|c| c.tools.as_slice())
     }
 
+    /// Get the build system info for a connected server, if it exposed a `_build_system` tool.
+    pub fn get_build_system_info(&self, server_name: &str) -> Option<&BuildSystemInfo> {
+        self.connections
+            .get(server_name)
+            .and_then(|c| c.build_system.as_ref())
+    }
+
+    /// Get all connected servers that have build system info (i.e. are build MCPs).
+    pub fn build_servers(&self) -> Vec<(&str, &BuildSystemInfo)> {
+        self.connections
+            .iter()
+            .filter_map(|(name, conn)| {
+                conn.build_system.as_ref().map(|bs| (name.as_str(), bs))
+            })
+            .collect()
+    }
+
     /// Get the names of all connected servers.
     pub fn connected_servers(&self) -> Vec<&str> {
         self.connections.keys().map(|s| s.as_str()).collect()
@@ -378,20 +525,36 @@ impl McpClientManager {
     }
 
     /// Call a tool on a specific external MCP server.
+    ///
+    /// If `server_name` is empty, searches all connected servers for a server
+    /// that exposes a tool with the given `tool_name`.
     pub async fn call_tool(
         &self,
         server_name: &str,
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<CallToolResult> {
+        // If server_name is empty, find the server that has this tool
+        let resolved_server = if server_name.is_empty() {
+            self.find_server_for_tool(tool_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No connected MCP server found that provides tool '{}'",
+                        tool_name
+                    )
+                })?
+        } else {
+            server_name.to_string()
+        };
+
         let conn = self
             .connections
-            .get(server_name)
-            .ok_or_else(|| anyhow::anyhow!("Unknown or disconnected MCP server: {}", server_name))?;
+            .get(&resolved_server)
+            .ok_or_else(|| anyhow::anyhow!("Unknown or disconnected MCP server: {}", resolved_server))?;
 
         info!(
             "MCP Client: calling '{}' on '{}'",
-            tool_name, server_name
+            tool_name, resolved_server
         );
 
         let result = conn
@@ -407,12 +570,22 @@ impl McpClientManager {
                 anyhow::anyhow!(
                     "Tool call '{}' on '{}' failed: {}",
                     tool_name,
-                    server_name,
+                    resolved_server,
                     e
                 )
             })?;
 
         Ok(result)
+    }
+
+    /// Find a connected server that exposes a tool with the given name.
+    fn find_server_for_tool(&self, tool_name: &str) -> Option<String> {
+        for (name, conn) in &self.connections {
+            if conn.tools.iter().any(|t| t.name == tool_name) {
+                return Some(name.clone());
+            }
+        }
+        None
     }
 }
 

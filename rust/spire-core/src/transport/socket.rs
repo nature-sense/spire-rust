@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (c) 2026 NatureSense
 
-//! JSON-RPC 2.0 transport over TCP socket.
+//! TransportActor — JSON-RPC 2.0 transport over TCP socket as an actor.
 //!
 //! This module provides bidirectional JSON-RPC communication over a TCP
-//! loopback socket, replacing the previous stdin/stdout transport which
-//! suffered from spurious EOF issues when the process was spawned by Node.js.
+//! loopback socket, replacing the previous `Arc<Mutex<Transport>>` design
+//! with a proper actor that owns all state directly.
 //!
 //! Architecture:
 //!   - Core binds to 127.0.0.1:0 (OS-assigned port)
@@ -21,11 +21,19 @@
 //!   {"jsonrpc":"2.0","method":"event/chat/message","params":{...}}
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
+
+use crate::actors::Actor;
+
+/// A notification received from the extension, forwarded to the coordinator.
+pub struct IncomingNotification {
+    pub method: String,
+    pub params: serde_json::Value,
+}
 
 /// A pending outgoing request (core → extension) waiting for a response.
 struct PendingRequest {
@@ -34,262 +42,143 @@ struct PendingRequest {
     method: String,
 }
 
-/// Handler for incoming JSON-RPC requests from the extension.
-pub type RequestHandler = Arc<dyn Fn(serde_json::Value) -> serde_json::Value + Send + Sync>;
-
-/// Bidirectional JSON-RPC 2.0 transport over TCP socket.
-pub struct Transport {
-    /// Pending outgoing requests awaiting responses.
-    pending: Arc<Mutex<HashMap<u64, PendingRequest>>>,
-    /// Next request ID for outgoing requests.
-    next_id: Arc<Mutex<u64>>,
-    /// Handler for incoming requests from the extension.
-    request_handler: Arc<Mutex<Option<RequestHandler>>>,
-    /// The port the transport is listening on.
-    port: Arc<Mutex<Option<u16>>>,
-    /// The TCP listener (held to keep the port bound).
-    _listener: Option<TcpListener>,
-    /// Write half of the accepted connection.
-    writer: Arc<Mutex<Option<tokio::io::WriteHalf<TcpStream>>>>,
-    /// Join handle for the socket reader task.
-    _reader_handle: Option<tokio::task::JoinHandle<()>>,
+/// Messages for the TransportActor.
+pub enum TransportMessage {
+    /// Bind to a loopback port and start listening.
+    Bind {
+        reply_to: oneshot::Sender<Result<u16, String>>,
+    },
+    /// Accept the extension's TCP connection.
+    Accept {
+        reply_to: oneshot::Sender<Result<(), String>>,
+    },
+    /// Send a JSON-RPC request to the extension and wait for a response.
+    CallExtension {
+        method: String,
+        params: serde_json::Value,
+        reply_to: oneshot::Sender<Result<serde_json::Value, String>>,
+    },
+    /// Send a JSON-RPC response to the extension (for incoming requests).
+    SendResponse {
+        id: u64,
+        result: serde_json::Value,
+    },
+    /// Send a JSON-RPC error response to the extension.
+    SendError {
+        id: u64,
+        code: i64,
+        message: String,
+    },
+    /// Send a notification (event) to the extension.
+    SendNotification {
+        method: String,
+        params: serde_json::Value,
+    },
+    /// A raw line was received from the socket (from the reader task).
+    SocketLine {
+        line: String,
+    },
+    /// Register a handler for incoming requests from the extension.
+    /// The handler is a sender to the coordinator actor.
+    SetRequestHandler {
+        handler_tx: mpsc::Sender<IncomingRequestMessage>,
+    },
+    /// Register a handler for incoming notifications from the extension.
+    /// The handler is a sender to the coordinator actor.
+    SetNotificationHandler {
+        notification_tx: mpsc::Sender<IncomingNotification>,
+    },
+    /// Set the transport actor's own sender (so the reader task can send messages back).
+    SetSelfTx {
+        self_tx: mpsc::Sender<TransportMessage>,
+    },
 }
 
-impl Transport {
-    /// Create a new transport.
-    ///
-    /// The listener is NOT started until `start()` is called.
-    /// This allows the caller to set up the request handler first,
-    /// avoiding race conditions where requests arrive before the
-    /// handler is registered.
+/// A message representing an incoming JSON-RPC request from the extension.
+pub struct IncomingRequestMessage {
+    pub id: u64,
+    pub method: String,
+    pub params: serde_json::Value,
+    /// Sender to send the response back through the transport.
+    pub response_tx: oneshot::Sender<serde_json::Value>,
+}
+
+/// Actor that owns the TCP socket and manages JSON-RPC communication.
+pub struct TransportActor {
+    /// Pending outgoing requests awaiting responses.
+    pending: HashMap<u64, PendingRequest>,
+    /// Next request ID for outgoing requests.
+    next_id: u64,
+    /// The TCP listener (held to keep the port bound).
+    listener: Option<TcpListener>,
+    /// Write half of the accepted connection.
+    writer: Option<tokio::io::WriteHalf<TcpStream>>,
+    /// Join handle for the socket reader task.
+    _reader_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Sender for incoming requests — forwarded to the coordinator.
+    handler_tx: Option<mpsc::Sender<IncomingRequestMessage>>,
+    /// Sender for incoming notifications — forwarded to the coordinator.
+    notification_tx: Option<mpsc::Sender<IncomingNotification>>,
+    /// Our own sender (set via SetSelfTx) — used by the reader task to send lines back.
+    self_tx: Option<mpsc::Sender<TransportMessage>>,
+}
+
+impl TransportActor {
     pub fn new() -> Self {
-        let pending = Arc::new(Mutex::new(HashMap::new()));
-        let next_id = Arc::new(Mutex::new(1u64));
-        let request_handler: Arc<Mutex<Option<RequestHandler>>> = Arc::new(Mutex::new(None));
-        let port = Arc::new(Mutex::new(None));
-        let writer = Arc::new(Mutex::new(None));
-
         Self {
-            pending,
-            next_id,
-            request_handler,
-            port,
-            _listener: None,
-            writer,
+            pending: HashMap::new(),
+            next_id: 1,
+            listener: None,
+            writer: None,
             _reader_handle: None,
+            handler_tx: None,
+            notification_tx: None,
+            self_tx: None,
         }
     }
 
-    /// Get the port the transport is listening on.
-    /// Returns `None` if `start()` has not been called yet.
-    pub async fn port(&self) -> Option<u16> {
-        *self.port.lock().await
-    }
-
-    /// Set the handler for incoming requests from the extension.
-    pub async fn set_request_handler(&self, handler: RequestHandler) {
-        let mut h = self.request_handler.lock().await;
-        *h = Some(handler);
-    }
-
-    /// Bind the TCP listener to a loopback port.
-    ///
-    /// This binds the listener but does NOT accept connections yet.
-    /// Call `accept()` later to wait for the extension to connect.
-    ///
-    /// Returns the port number the listener is bound to.
-    pub async fn bind(&mut self) -> Result<u16, Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let local_addr = listener.local_addr()?;
-        let port = local_addr.port();
-
-        info!("Transport: listening on 127.0.0.1:{}", port);
-
-        // Store the port
-        {
-            let mut p = self.port.lock().await;
-            *p = Some(port);
-        }
-
-        self._listener = Some(listener);
-
-        Ok(port)
-    }
-
-    /// Accept one connection from the bound listener.
-    ///
-    /// Must be called AFTER `bind()` and `set_request_handler()`.
-    /// This will block until the extension connects.
-    pub async fn accept(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let listener = self._listener.as_ref().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotConnected, "Transport not bound yet")
-        })?;
-
-        let pending = self.pending.clone();
-        let handler = self.request_handler.clone();
-        let writer = self.writer.clone();
-
-        // Accept one connection
-        let (stream, peer_addr) = listener.accept().await?;
-        info!("Transport: accepted connection from {}", peer_addr);
-
-        // Split the stream into read/write halves
-        let (reader, writer_half) = tokio::io::split(stream);
-
-        // Store the writer half for outgoing messages
-        {
-            let mut w = writer.lock().await;
-            *w = Some(writer_half);
-        }
-
-        // Spawn a task to read lines from the socket and process them.
-        let reader_handle = tokio::spawn(async move {
-            let mut buf_reader = BufReader::new(reader);
-            let mut line = String::new();
-            loop {
-                line.clear();
-                match buf_reader.read_line(&mut line).await {
-                    Ok(0) => {
-                        info!("Transport: socket EOF (extension closed connection)");
-                        break;
-                    }
-                    Ok(_) => {
-                        let trimmed = line.trim().to_string();
-                        if !trimmed.is_empty() {
-                            Self::process_line(&trimmed, &pending, &handler, &writer).await;
-                        }
-                    }
-                    Err(e) => {
-                        error!("Transport: error reading from socket: {}", e);
-                        break;
-                    }
-                }
+    /// Write a JSON message to the socket.
+    async fn write_json(&mut self, value: &serde_json::Value) {
+        let json = serde_json::to_string(value).unwrap_or_default();
+        if let Some(ref mut w) = self.writer {
+            let line = format!("{}\n", json);
+            if let Err(e) = w.write_all(line.as_bytes()).await {
+                warn!("TransportActor: failed to write to socket: {}", e);
             }
-            info!("Transport: socket reader task finished");
-        });
-
-        self._reader_handle = Some(reader_handle);
-
-        Ok(())
-    }
-
-    /// Start the TCP listener and accept one connection (original combined method).
-    ///
-    /// Equivalent to calling `bind()` then `accept()`.
-    /// Returns the port number the listener is bound to.
-    pub async fn start(&mut self) -> Result<u16, Box<dyn std::error::Error>> {
-        let port = self.bind().await?;
-        self.accept().await?;
-        Ok(port)
-    }
-
-    /// Send a JSON-RPC response to the extension.
-    pub async fn send_response(&self, id: u64, result: &serde_json::Value) {
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result,
-        });
-        self.write_json(&response).await;
-    }
-
-    /// Send a JSON-RPC error response to the extension.
-    pub async fn send_error(&self, id: u64, code: i64, message: &str) {
-        let response = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": code,
-                "message": message,
-            },
-        });
-        self.write_json(&response).await;
-    }
-
-    /// Send a notification (event) to the extension.
-    pub async fn send_notification(&self, method: &str, params: &serde_json::Value) {
-        let notification = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        });
-        self.write_json(&notification).await;
-    }
-
-    /// Send a request to the extension and wait for a response.
-    ///
-    /// This is used when the core needs to call VS Code API methods
-    /// (e.g., workspace/getFolders, editor/getActive).
-    pub async fn call_extension(
-        &self,
-        method: &str,
-        params: &serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
-        let mut id_lock = self.next_id.lock().await;
-        let id = *id_lock;
-        *id_lock += 1;
-        drop(id_lock);
-
-        let (response_tx, response_rx) = oneshot::channel();
-
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id, PendingRequest {
-                response_tx,
-                method: method.to_string(),
-            });
-        }
-
-        let request = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        self.write_json(&request).await;
-
-        // Wait for the response with a timeout
-        match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(format!("Response channel closed for '{}'", method)),
-            Err(_) => {
-                // Timeout — clean up pending
-                let mut pending = self.pending.lock().await;
-                pending.remove(&id);
-                Err(format!("Request timed out: {} (id={})", method, id))
-            }
+        } else {
+            debug!("TransportActor: cannot write JSON, socket writer not available (not yet connected)");
         }
     }
 
     /// Process a single line received from the socket.
-    async fn process_line(
-        line: &str,
-        pending: &Arc<Mutex<HashMap<u64, PendingRequest>>>,
-        handler: &Arc<Mutex<Option<RequestHandler>>>,
-        writer: &Arc<Mutex<Option<tokio::io::WriteHalf<TcpStream>>>>,
-    ) {
+    async fn process_line(&mut self, line: &str) {
         let msg: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                error!("Transport: failed to parse JSON: {}", e);
+                error!("TransportActor: failed to parse JSON: {}", e);
                 return;
             }
         };
 
         let id = msg.get("id").and_then(|v| v.as_u64());
-        let method = msg.get("method").and_then(|v| v.as_str());
+        let method = msg.get("method").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         match (id, method) {
-            // Notification (no id) — fire and forget
-            (None, Some(_method_name)) => {
-                debug!("Transport: received notification: {}", _method_name);
-                // Notifications are currently ignored by the core
-                // (they come from the extension, e.g., editor state changes)
+            // Notification (no id) — forward to the notification handler
+            (None, Some(method_name)) => {
+                debug!("TransportActor: received notification: {}", method_name);
+                if let Some(ref notification_tx) = self.notification_tx {
+                    let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                    let _ = notification_tx
+                        .try_send(IncomingNotification {
+                            method: method_name,
+                            params,
+                        });
+                }
             }
             // Response to one of our outgoing requests
             (Some(id_val), None) => {
-                let mut pending_lock = pending.lock().await;
-                if let Some(pending_req) = pending_lock.remove(&id_val) {
+                if let Some(pending_req) = self.pending.remove(&id_val) {
                     if let Some(error) = msg.get("error") {
                         let msg_str = error.get("message")
                             .and_then(|v| v.as_str())
@@ -301,84 +190,252 @@ impl Transport {
                         let _ = pending_req.response_tx.send(Ok(result));
                     }
                 } else {
-                    warn!("Transport: received response for unknown request id={}", id_val);
+                    warn!("TransportActor: received response for unknown request id={}", id_val);
                 }
             }
             // Incoming request from the extension
-            //
-            // IMPORTANT: The handler must be executed on a background task, NOT
-            // on the reader task. If the handler calls call_extension() (which
-            // writes to the socket and waits for a response), the reader task
-            // must be alive to read that response. Blocking the reader task
-            // would cause a deadlock.
-            (Some(id_val), Some(_method_name)) => {
-                let handler_clone = handler.clone();
-                let writer_clone = writer.clone();
-                let msg_clone = msg.clone();
-                tokio::spawn(async move {
-                    let handler_lock = handler_clone.lock().await;
-                    if let Some(ref h) = *handler_lock {
-                        let result = h(msg_clone);
-                        drop(handler_lock);
+            (Some(id_val), Some(method_name)) => {
+                if let Some(ref handler_tx) = self.handler_tx {
+                    let params = msg.get("params").cloned().unwrap_or(serde_json::Value::Null);
+                    let (response_tx, response_rx) = oneshot::channel();
+                    let handler_tx = handler_tx.clone();
+                    let self_tx = self.self_tx.clone();
 
-                        // Send the response back through the socket
-                        let response = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id_val,
-                            "result": result,
-                        });
-                        let json = serde_json::to_string(&response).unwrap_or_default();
-                        let mut w = writer_clone.lock().await;
-                        if let Some(ref mut writer_half) = *w {
-                            let line = format!("{}\n", json);
-                            if let Err(e) = writer_half.write_all(line.as_bytes()).await {
-                                error!("Transport: failed to write response to socket: {}", e);
+                    // Spawn a task to forward to the handler and send the response back
+                    tokio::spawn(async move {
+                        if handler_tx
+                            .send(IncomingRequestMessage {
+                                id: id_val,
+                                method: method_name.to_string(),
+                                params,
+                                response_tx,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            error!("TransportActor: failed to forward incoming request to handler");
+                            return;
+                        }
+
+                        // Wait for the handler's response
+                        match response_rx.await {
+                            Ok(result) => {
+                                // Send the response back to the transport actor for writing
+                                if let Some(ref tx) = self_tx {
+                                    let _ = tx
+                                        .send(TransportMessage::SendResponse {
+                                            id: id_val,
+                                            result,
+                                        })
+                                        .await;
+                                }
                             }
-                        } else {
-                            error!("Transport: cannot write response, socket writer not available");
+                            Err(_) => {
+                                error!("TransportActor: handler response channel closed for id={}", id_val);
+                            }
                         }
-                    } else {
-                        warn!("Transport: no request handler registered, sending error for id={}", id_val);
-                        let response = serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": id_val,
-                            "error": {
-                                "code": -32601,
-                                "message": "Method not found: no handler registered",
-                            },
-                        });
-                        let json = serde_json::to_string(&response).unwrap_or_default();
-                        let mut w = writer_clone.lock().await;
-                        if let Some(ref mut writer_half) = *w {
-                            let line = format!("{}\n", json);
-                            let _ = writer_half.write_all(line.as_bytes()).await;
-                        }
-                    }
-                });
+                    });
+                } else {
+                    warn!("TransportActor: no request handler registered, sending error for id={}", id_val);
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id_val,
+                        "error": {
+                            "code": -32601,
+                            "message": "Method not found: no handler registered",
+                        },
+                    });
+                    self.write_json(&response).await;
+                }
             }
             (None, None) => {
-                warn!("Transport: received invalid message (no id and no method)");
+                warn!("TransportActor: received invalid message (no id and no method)");
             }
-        }
-    }
-
-    /// Write a JSON message to the socket.
-    async fn write_json(&self, value: &serde_json::Value) {
-        let json = serde_json::to_string(value).unwrap_or_default();
-        let mut writer = self.writer.lock().await;
-        if let Some(ref mut w) = *writer {
-            let line = format!("{}\n", json);
-            if let Err(e) = w.write_all(line.as_bytes()).await {
-                warn!("Transport: failed to write to socket: {}", e);
-            }
-        } else {
-            debug!("Transport: cannot write JSON, socket writer not available (not yet connected)");
         }
     }
 }
 
-impl Drop for Transport {
-    fn drop(&mut self) {
-        // The reader handle will be cancelled when the runtime shuts down
+#[async_trait]
+impl Actor for TransportActor {
+    type Message = TransportMessage;
+
+    async fn handle(&mut self, msg: Self::Message) {
+        match msg {
+            TransportMessage::Bind { reply_to } => {
+                match TcpListener::bind("127.0.0.1:0").await {
+                    Ok(listener) => {
+                        let local_addr = match listener.local_addr() {
+                            Ok(addr) => addr,
+                            Err(e) => {
+                                let _ = reply_to.send(Err(format!("Failed to get local addr: {}", e)));
+                                return;
+                            }
+                        };
+                        let port = local_addr.port();
+                        info!("TransportActor: listening on 127.0.0.1:{}", port);
+                        self.listener = Some(listener);
+                        let _ = reply_to.send(Ok(port));
+                    }
+                    Err(e) => {
+                        let _ = reply_to.send(Err(format!("Failed to bind: {}", e)));
+                    }
+                }
+            }
+
+            TransportMessage::Accept { reply_to } => {
+                let listener = match self.listener.as_ref() {
+                    Some(l) => l,
+                    None => {
+                        let _ = reply_to.send(Err("Transport not bound yet".to_string()));
+                        return;
+                    }
+                };
+
+                // We need to accept without holding a reference to self.listener
+                // that would prevent us from moving it. We take ownership.
+                // But we can't take ownership from an Option reference.
+                // Solution: use try_clone or just accept on the original listener.
+                // Actually, TcpListener::accept takes &self, so we can use it via reference.
+                match listener.accept().await {
+                    Ok((stream, peer_addr)) => {
+                        info!("TransportActor: accepted connection from {}", peer_addr);
+
+                        let (reader, writer_half) = tokio::io::split(stream);
+                        self.writer = Some(writer_half);
+
+                        // Spawn a task to read lines from the socket.
+                        // The reader sends lines back to the actor via its mailbox.
+                        let self_tx = match self.self_tx.clone() {
+                            Some(tx) => tx,
+                            None => {
+                                error!("TransportActor: self_tx not set before Accept");
+                                let _ = reply_to.send(Err("self_tx not set".to_string()));
+                                return;
+                            }
+                        };
+
+                        let _reader_handle = tokio::spawn(async move {
+                            let mut buf_reader = BufReader::new(reader);
+                            let mut line = String::new();
+                            loop {
+                                line.clear();
+                                match buf_reader.read_line(&mut line).await {
+                                    Ok(0) => {
+                                        info!("TransportActor: socket EOF (extension closed connection)");
+                                        break;
+                                    }
+                                    Ok(_) => {
+                                        let trimmed = line.trim().to_string();
+                                        if !trimmed.is_empty() {
+                                            if self_tx
+                                                .send(TransportMessage::SocketLine { line: trimmed })
+                                                .await
+                                                .is_err()
+                                            {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!("TransportActor: error reading from socket: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+
+                        self._reader_handle = Some(_reader_handle);
+                        let _ = reply_to.send(Ok(()));
+                    }
+                    Err(e) => {
+                        let _ = reply_to.send(Err(format!("Failed to accept: {}", e)));
+                    }
+                }
+            }
+
+            TransportMessage::SocketLine { line } => {
+                self.process_line(&line).await;
+            }
+
+            TransportMessage::CallExtension { method, params, reply_to } => {
+                let id = self.next_id;
+                self.next_id += 1;
+
+                let (response_tx, response_rx) = oneshot::channel();
+
+                self.pending.insert(id, PendingRequest {
+                    response_tx,
+                    method: method.clone(),
+                });
+
+                let request = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": method,
+                    "params": params,
+                });
+                self.write_json(&request).await;
+
+                // Wait for the response with a timeout
+                match tokio::time::timeout(std::time::Duration::from_secs(30), response_rx).await {
+                    Ok(Ok(result)) => {
+                        // result is Result<Value, String> from PendingRequest.response_tx
+                        let _ = reply_to.send(result);
+                    }
+                    Ok(Err(_)) => {
+                        self.pending.remove(&id);
+                        let _ = reply_to.send(Err(format!("Response channel closed for '{}'", method)));
+                    }
+                    Err(_) => {
+                        self.pending.remove(&id);
+                        let _ = reply_to.send(Err(format!("Request timed out: {} (id={})", method, id)));
+                    }
+                }
+            }
+
+            TransportMessage::SendResponse { id, result } => {
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                });
+                self.write_json(&response).await;
+            }
+
+            TransportMessage::SendError { id, code, message } => {
+                let response = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": code,
+                        "message": message,
+                    },
+                });
+                self.write_json(&response).await;
+            }
+
+            TransportMessage::SendNotification { method, params } => {
+                let notification = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params,
+                });
+                self.write_json(&notification).await;
+            }
+
+            TransportMessage::SetRequestHandler { handler_tx } => {
+                self.handler_tx = Some(handler_tx);
+                info!("TransportActor: request handler registered");
+            }
+
+            TransportMessage::SetNotificationHandler { notification_tx } => {
+                self.notification_tx = Some(notification_tx);
+                info!("TransportActor: notification handler registered");
+            }
+
+            TransportMessage::SetSelfTx { self_tx } => {
+                self.self_tx = Some(self_tx);
+            }
+        }
     }
 }

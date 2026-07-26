@@ -44,14 +44,26 @@ pub fn parse_package_json(project_root: &Path) -> Option<BuildMetadata> {
     };
 
     // Parse scripts
+    let build_system_name = build_system; // capture for closure
     let scripts: Vec<BuildScript> = json
         .get("scripts")
         .and_then(|v| v.as_object())
         .map(|obj| {
             obj.iter()
-                .map(|(name, cmd)| BuildScript {
-                    name: name.clone(),
-                    command: cmd.as_str().unwrap_or("").to_string(),
+                .map(|(name, cmd)| {
+                    let raw_cmd = cmd.as_str().unwrap_or("").to_string();
+                    BuildScript {
+                        name: name.clone(),
+                        command: raw_cmd.clone(),
+                        tool_call: Some(serde_json::json!({
+                            "tool": "project/build",
+                            "args": {
+                                "mode": name.clone(),
+                                "command": raw_cmd,
+                                "buildSystem": build_system_name,
+                            }
+                        })),
+                    }
                 })
                 .collect()
         })

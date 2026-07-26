@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 #
 # build-and-install.sh — Build all Rust binaries + extension JS,
 # kill any running subprocesses, and install into VS Code.
@@ -28,6 +27,8 @@ pkill -f "mcp-process" 2>/dev/null || true
 pkill -f "mcp-search"    2>/dev/null || true
 pkill -f "mcp-terminal"  2>/dev/null || true
 pkill -f "mcp-filesystem"  2>/dev/null || true
+pkill -f "mcp-cargo"      2>/dev/null || true
+pkill -f "mcp-node"       2>/dev/null || true
 sleep 1
 
 # Verify they're gone
@@ -48,6 +49,8 @@ cargo build --release -p mcp-process
 cargo build --release -p mcp-search
 cargo build --release -p mcp-terminal
 cargo build --release -p mcp-filesystem
+cargo build --release -p mcp-cargo
+cargo build --release -p mcp-node
 cd "$ROOT"
 echo "Rust build complete."
 echo ""
@@ -81,9 +84,32 @@ cp "$ROOT/rust/target/release/mcp-process"   "$BIN_DIR/mcp-process"
 cp "$ROOT/rust/target/release/mcp-search"    "$BIN_DIR/mcp-search"
 cp "$ROOT/rust/target/release/mcp-terminal"  "$BIN_DIR/mcp-terminal"
 cp "$ROOT/rust/target/release/mcp-filesystem"  "$BIN_DIR/mcp-filesystem"
-chmod +x "$BIN_DIR/spire-core" "$BIN_DIR/mcp-git" "$BIN_DIR/mcp-process" "$BIN_DIR/mcp-search" "$BIN_DIR/mcp-terminal" "$BIN_DIR/mcp-filesystem"
+cp "$ROOT/rust/target/release/mcp-cargo"       "$BIN_DIR/mcp-cargo"
+cp "$ROOT/rust/target/release/mcp-node"        "$BIN_DIR/mcp-node"
+chmod +x "$BIN_DIR/spire-core" "$BIN_DIR/mcp-git" "$BIN_DIR/mcp-process" "$BIN_DIR/mcp-search" "$BIN_DIR/mcp-terminal" "$BIN_DIR/mcp-filesystem" "$BIN_DIR/mcp-cargo" "$BIN_DIR/mcp-node"
 echo "Binaries copied to $BIN_DIR"
 echo ""
+
+# ── Step 5b: Copy embedding model alongside binaries ───────────────────────
+echo "--- Copying embedding model ---"
+MODEL_SRC_DIR="$HOME/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2"
+MODEL_DEST_DIR="$BIN_DIR/models/all-MiniLM-L6-v2"
+if [ -d "$MODEL_SRC_DIR/snapshots" ]; then
+    SNAPSHOT_DIR=$(ls -1 "$MODEL_SRC_DIR/snapshots" 2>/dev/null | head -1)
+    if [ -n "$SNAPSHOT_DIR" ] && [ -d "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR" ]; then
+        mkdir -p "$MODEL_DEST_DIR"
+        cp "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR/config.json" "$MODEL_DEST_DIR/config.json" 2>/dev/null || true
+        cp "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR/tokenizer.json" "$MODEL_DEST_DIR/tokenizer.json" 2>/dev/null || true
+        cp "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR/model.safetensors" "$MODEL_DEST_DIR/model.safetensors" 2>/dev/null || true
+        echo "Embedding model copied to $MODEL_DEST_DIR"
+    else
+        echo "WARNING: No snapshot found in HF cache — model not bundled (will download at runtime)"
+    fi
+else
+    echo "WARNING: HF cache not found at $MODEL_SRC_DIR — model not bundled (will download at runtime)"
+fi
+echo ""
+
 
 # ── Step 6: Copy extension JS ──────────────────────────────────────────────
 echo "--- Copying extension JS ---"
@@ -118,9 +144,25 @@ cp "$ROOT/rust/target/release/mcp-process"   "$DEV_BIN_DIR/mcp-process"
 cp "$ROOT/rust/target/release/mcp-search"    "$DEV_BIN_DIR/mcp-search"
 cp "$ROOT/rust/target/release/mcp-terminal"  "$DEV_BIN_DIR/mcp-terminal"
 cp "$ROOT/rust/target/release/mcp-filesystem"  "$DEV_BIN_DIR/mcp-filesystem"
-chmod +x "$DEV_BIN_DIR/spire-core" "$DEV_BIN_DIR/mcp-git" "$DEV_BIN_DIR/mcp-process" "$DEV_BIN_DIR/mcp-search" "$DEV_BIN_DIR/mcp-terminal" "$DEV_BIN_DIR/mcp-filesystem"
+cp "$ROOT/rust/target/release/mcp-cargo"       "$DEV_BIN_DIR/mcp-cargo"
+cp "$ROOT/rust/target/release/mcp-node"        "$DEV_BIN_DIR/mcp-node"
+chmod +x "$DEV_BIN_DIR/spire-core" "$DEV_BIN_DIR/mcp-git" "$DEV_BIN_DIR/mcp-process" "$DEV_BIN_DIR/mcp-search" "$DEV_BIN_DIR/mcp-terminal" "$DEV_BIN_DIR/mcp-filesystem" "$DEV_BIN_DIR/mcp-cargo" "$DEV_BIN_DIR/mcp-node"
+
+# Also copy embedding model to dev workspace dir
+DEV_MODEL_DEST_DIR="$DEV_BIN_DIR/models/all-MiniLM-L6-v2"
+if [ -d "$MODEL_SRC_DIR/snapshots" ]; then
+    SNAPSHOT_DIR=$(ls -1 "$MODEL_SRC_DIR/snapshots" 2>/dev/null | head -1)
+    if [ -n "$SNAPSHOT_DIR" ] && [ -d "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR" ]; then
+        mkdir -p "$DEV_MODEL_DEST_DIR"
+        cp "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR/config.json" "$DEV_MODEL_DEST_DIR/config.json" 2>/dev/null || true
+        cp "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR/tokenizer.json" "$DEV_MODEL_DEST_DIR/tokenizer.json" 2>/dev/null || true
+        cp "$MODEL_SRC_DIR/snapshots/$SNAPSHOT_DIR/model.safetensors" "$DEV_MODEL_DEST_DIR/model.safetensors" 2>/dev/null || true
+        echo "Embedding model copied to $DEV_MODEL_DEST_DIR"
+    fi
+fi
 echo "Workspace binaries updated."
 echo ""
+
 
 # ── Step 9: Clean up stale lock files (NOT the WAL/snapshot data) ──────────
 echo "--- Cleaning up stale lock files ---"

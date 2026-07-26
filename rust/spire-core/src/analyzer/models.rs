@@ -87,26 +87,37 @@ pub struct ProjectFileTree {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildMetadata {
     /// Project name (if available).
+    #[serde(default)]
     pub project_name: Option<String>,
     /// Project version (if available).
+    #[serde(default)]
     pub version: Option<String>,
     /// Detected project type (e.g. "rust_crate", "node_package", "meson_project").
+    #[serde(default)]
     pub project_type: String,
     /// Build system name (e.g. "Cargo", "npm", "Meson").
+    #[serde(default)]
     pub build_system: String,
     /// Whether this is a workspace/multi-module project.
+    #[serde(default)]
     pub is_workspace: bool,
     /// Workspace member paths (if applicable).
+    #[serde(default)]
     pub workspace_members: Vec<WorkspaceMember>,
     /// Available build scripts/targets.
+    #[serde(default)]
     pub scripts: Vec<BuildScript>,
     /// Feature flags (if applicable).
+    #[serde(default)]
     pub features: Vec<Feature>,
     /// Build targets (executables, libraries, etc.).
+    #[serde(default)]
     pub targets: Vec<BuildTarget>,
     /// Build config file paths.
+    #[serde(default)]
     pub config_files: Vec<String>,
     /// Raw parsed data (build-system-specific).
+    #[serde(default)]
     pub raw: Option<serde_json::Value>,
 }
 
@@ -126,8 +137,14 @@ pub struct WorkspaceMember {
 pub struct BuildScript {
     /// Script name (e.g. "build", "test").
     pub name: String,
-    /// Shell command to run.
+    /// Shell command to run (legacy — prefer tool_call).
+    #[serde(default)]
     pub command: String,
+    /// Recommended tool call to execute this script.
+    /// E.g. `{"tool": "project/build", "args": {"mode": "debug"}}`
+    /// When present, agents should use this tool call instead of running the shell command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call: Option<serde_json::Value>,
 }
 
 /// A feature flag or build option.
@@ -228,6 +245,18 @@ pub struct CargoTarget {
     pub edition: Option<String>,
     pub required_features: Vec<String>,
     pub crate_types: Vec<String>,
+}
+
+/// Capabilities advertised by an MCP server via `describe_analysis_capabilities`.
+///
+/// This is the response shape returned by build-system MCP servers (mcp-cargo,
+/// mcp-node, etc.) when queried about what build files they can analyze.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerCapability {
+    /// Build file patterns this server can handle (e.g. `["Cargo.toml"]`).
+    pub supported_files: Vec<String>,
+    /// Name of the tool to call for analysis (e.g. `"analyze"`).
+    pub analyzer_tool: String,
 }
 
 /// A workspace member from Cargo.toml.

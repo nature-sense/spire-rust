@@ -27,9 +27,8 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::info;
 
 use crate::actors::Actor;
 use crate::actors::memory_graph::MemoryGraphMessage;
@@ -279,6 +278,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: Some(1),
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -307,6 +307,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
             .unwrap_or_default();
@@ -320,6 +321,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
             .unwrap_or_default();
@@ -350,6 +352,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
             .unwrap_or_default();
@@ -441,6 +444,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -460,6 +464,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -550,6 +555,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -588,6 +594,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
             .unwrap_or_default()
@@ -649,6 +656,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -741,6 +749,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -753,12 +762,21 @@ impl ProjectQueryActor {
         let systems: Vec<serde_json::Value> = build_systems
             .iter()
             .map(|bs| {
+                // Derive the build directory from config_file (e.g. "rust/Cargo.toml" → "rust")
+                let config_file = bs.properties.get("config_file").and_then(|v| v.as_str());
+                let build_dir = config_file.and_then(|f| {
+                    let p = std::path::Path::new(f);
+                    p.parent().map(|parent| parent.to_string_lossy().to_string())
+                });
+
                 serde_json::json!({
                     "id": bs.id,
                     "name": bs.name,
                     "buildType": bs.properties.get("build_type"),
                     "projectName": bs.properties.get("project_name"),
                     "version": bs.properties.get("version"),
+                    "configFile": config_file,
+                    "path": build_dir,
                     "scripts": bs.properties.get("scripts"),
                     "dependencies": bs.properties.get("dependencies"),
                 })
@@ -788,6 +806,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: Some(1),
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -881,6 +900,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -928,6 +948,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: Some(1),
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -952,6 +973,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
             .unwrap_or_default();
@@ -984,6 +1006,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
             .unwrap_or_default();
@@ -998,6 +1021,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
             .unwrap_or_default();
@@ -1075,6 +1099,7 @@ impl ProjectQueryActor {
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -1162,7 +1187,8 @@ impl ProjectQueryActor {
                     tags: None,
                     limit: Some(1),
                     offset: None,
-                })
+                properties: None,
+            })
                 .await
             {
                 Ok(nodes) => nodes,
@@ -1270,6 +1296,7 @@ impl ProjectQueryActor {
                 }),
                 limit: Some(limit),
                 offset: None,
+                properties: None,
             })
             .await
         {
@@ -1323,6 +1350,186 @@ impl ProjectQueryActor {
         })
     }
 
+    /// `project/analysis` — comprehensive project analysis for the webview Project tab.
+    ///
+    /// Returns data in the format expected by the webview's `renderProjectAnalysis()`:
+    ///   - overview: name, root, language, build_system, file_count, loc
+    ///   - dependencies: [{name, version}]
+    ///   - modules: [{name, path}]
+    ///   - build_targets: [{name, kind}]
+    async fn handle_analysis(&self) -> serde_json::Value {
+        // Get the project node
+        let project_nodes = match self
+            .query_nodes(NodeFilter {
+                node_type: Some(NodeType::Project),
+                subtype: None,
+                name: None,
+                status: None,
+                tags: None,
+                limit: Some(1),
+                offset: None,
+                properties: None,
+            })
+            .await
+        {
+            Ok(nodes) => nodes,
+            Err(e) => {
+                return serde_json::json!({"error": format!("Failed to query project: {}", e)})
+            }
+        };
+
+        let project = match project_nodes.first() {
+            Some(p) => p,
+            None => {
+                return serde_json::json!(
+                    {"error": "No project node found. Has the project been synced?"}
+                )
+            }
+        };
+
+        // Query file nodes
+        let file_nodes = self
+            .query_nodes(NodeFilter {
+                node_type: Some(NodeType::Unknown),
+                subtype: Some("File".to_string()),
+                name: None,
+                status: None,
+                tags: None,
+                limit: None,
+                offset: None,
+                properties: None,
+            })
+            .await
+            .unwrap_or_default();
+
+        // Query directory nodes
+        let dir_nodes = self
+            .query_nodes(NodeFilter {
+                node_type: Some(NodeType::Unknown),
+                subtype: Some("Directory".to_string()),
+                name: None,
+                status: None,
+                tags: None,
+                limit: None,
+                offset: None,
+                properties: None,
+            })
+            .await
+            .unwrap_or_default();
+
+        // Query build system nodes
+        let build_systems = self
+            .query_nodes(NodeFilter {
+                node_type: Some(NodeType::Unknown),
+                subtype: Some("BuildSystem".to_string()),
+                name: None,
+                status: None,
+                tags: None,
+                limit: None,
+                offset: None,
+                properties: None,
+            })
+            .await
+            .unwrap_or_default();
+
+        // Collect languages
+        let mut languages: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for file in &file_nodes {
+            if let Some(lang) = file.properties.get("language").and_then(|v| v.as_str()) {
+                languages.insert(lang.to_string());
+            }
+        }
+
+        // Compute total lines
+        let total_lines: usize = file_nodes
+            .iter()
+            .filter_map(|f| f.properties.get("lines").and_then(|v| v.as_u64()))
+            .sum::<u64>() as usize;
+
+        // Build overview section
+        let primary_language = languages.iter().next().cloned().unwrap_or_default();
+        let primary_build_system = build_systems
+            .first()
+            .map(|bs| bs.name.clone())
+            .unwrap_or_default();
+
+        let overview = serde_json::json!({
+            "name": project.name,
+            "root": project.properties.get("path"),
+            "language": primary_language,
+            "build_system": primary_build_system,
+            "file_count": file_nodes.len(),
+            "loc": total_lines,
+        });
+
+        // Build dependencies section — traverse DependsOn relationships from project
+        let dependencies: Vec<serde_json::Value> = {
+            let traversal = self
+                .traverse(
+                    &project.id,
+                    TraversalOptions {
+                        max_depth: 2,
+                        relationship_types: Some(vec![RelationshipType::DependsOn]),
+                        max_nodes: Some(200),
+                        direction: Some(TraversalDirection::Out),
+                    },
+                )
+                .await
+                .unwrap_or(crate::models::memory_graph::TraversalResult {
+                    nodes: vec![],
+                    edges: vec![],
+                    paths: vec![],
+                });
+
+            traversal
+                .nodes
+                .iter()
+                .filter(|n| n.id != project.id)
+                .map(|n| {
+                    serde_json::json!({
+                        "name": n.name,
+                        "version": n.properties.get("version"),
+                    })
+                })
+                .collect()
+        };
+
+        // Build modules section — from directory nodes with roles
+        let modules: Vec<serde_json::Value> = dir_nodes
+            .iter()
+            .filter_map(|d| {
+                let path = d.properties.get("path").and_then(|v| v.as_str())?;
+                let name = d
+                    .properties
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&d.name);
+                Some(serde_json::json!({
+                    "name": name,
+                    "path": path,
+                }))
+            })
+            .collect();
+
+        // Build build_targets section — from build system nodes
+        let build_targets: Vec<serde_json::Value> = build_systems
+            .iter()
+            .map(|bs| {
+                serde_json::json!({
+                    "name": bs.name,
+                    "kind": bs.properties.get("build_type"),
+                })
+            })
+            .collect();
+
+        serde_json::json!({
+            "overview": overview,
+            "dependencies": dependencies,
+            "modules": modules,
+            "build_targets": build_targets,
+        })
+    }
+
     // ── Message Handler ───────────────────────────────────────────────────
 
     /// Handle an incoming message.
@@ -1367,6 +1574,7 @@ impl ProjectQueryActor {
             "project/getRelationships" => self.handle_get_relationships(args).await,
             "project/queryGraph" => self.handle_query_graph(args).await,
             "project/getChanges" => self.handle_get_changes().await,
+            "project/analysis" => self.handle_analysis().await,
             _ => serde_json::json!({"error": format!("Unknown tool: {}", tool)}),
         }
     }

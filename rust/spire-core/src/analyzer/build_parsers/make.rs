@@ -79,6 +79,7 @@ pub fn parse_makefile(project_root: &Path) -> Option<BuildMetadata> {
             scripts.push(BuildScript {
                 name: target.to_string(),
                 command: format!("make {}", target),
+                tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": target}})),
             });
         }
     }
@@ -89,6 +90,7 @@ pub fn parse_makefile(project_root: &Path) -> Option<BuildMetadata> {
             scripts.push(BuildScript {
                 name: target.name.clone(),
                 command: format!("make {}", target.name),
+                tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": target.name}})),
             });
         }
     }

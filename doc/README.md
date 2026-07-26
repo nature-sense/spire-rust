@@ -8,52 +8,27 @@ Reference documentation for the Spire Rust project.
 
 | Document | Description |
 |----------|-------------|
-| [`extension-core-interface.md`](extension-core-interface.md) | Complete reference for the JSON-RPC 2.0 interface between the VS Code extension and the Rust core — transport, protocol, tool catalog, notifications, lifecycle, error handling, and sequence diagrams |
-| [`messages-and-types.md`](messages-and-types.md) | Complete reference for the actor system — message enums, reply channels, and all shared data structures |
-| [`actors-and-messages.md`](actors-and-messages.md) | Catalog of every actor in the system, their message enum variants, and how they connect |
-| [`graph-schema.md`](graph-schema.md) | Complete graph schema reference — node types, relationship types, constraints, and physical storage mapping |
+| [`actors-and-messages.md`](actors-and-messages.md) | **New!** Complete catalog of all 20+ actors, their message enum variants, and wiring diagram |
+| [`messages-and-types.md`](messages-and-types.md) | **New!** Quick reference for all shared data types (graph nodes, plans, build results, fix plans) |
+| [`multi-step-flows.md`](multi-step-flows.md) | **Updated!** Execution flow diagrams for the build-fix loop, plan mode, and error analysis |
+| [`extension-core-interface.md`](extension-core-interface.md) | JSON-RPC 2.0 interface spec between the VS Code extension and the Rust core |
+| [`graph-schema.md`](graph-schema.md) | Graph schema reference — node types, relationship types, constraints, and storage mapping |
 | [`json-rpc-protocol.md`](json-rpc-protocol.md) | JSON-RPC 2.0 message reference for extension–core communication |
-| [`agent-implementation-instructions.md`](agent-implementation-instructions.md) | Agent implementation guidelines and patterns |
-| [`agent-infrastructure.md`](agent-infrastructure.md) | Agent infrastructure overview and architecture |
-| [`vscode-environment-model.md`](vscode-environment-model.md) | VS Code environment model reference |
 | [`packaging-structure.md`](packaging-structure.md) | Binary packaging and staging guide |
-| [`test-suite-reference.md`](test-suite-reference.md) | Reference for all test files — Rust unit tests, JSON-RPC integration tests, and TypeScript extension tests |
+| [`test-suite-reference.md`](test-suite-reference.md) | **Updated!** Test file catalog — Rust unit tests, actor tests, and integration tests |
+| [`actor.md`](actor.md) | Actor pattern design guidelines for implementing new actors |
 
----
+### Deleted (Superseded)
 
-## `messages-and-types.md`
-
-This is the primary reference document for the `spire-core/` actor system. It covers:
-
-- **Message Definitions** — All message variants with their reply types and descriptions:
-  - `CoordinatorMessage` (3 variants)
-  - `MemoryGraphMessage` (14 variants)
-  - `ProgressMessage` (2 variants)
-  - `LlmMessage` (2 variants)
-  - `ChatMessage` (3 variants)
-  - `ToolsMessage` (2 variants)
-  - `SystemMessage` (3 variants)
-  - `McpClientMessage` (4 variants)
-  - `ProjectSyncMessage` (4 variants)
-  - `ProjectAnalyzerMessage` (2 variants)
-  - `ProjectQueryMessage` (2 variants)
-- **Data Model Types** — Full struct definitions for:
-  - `GraphNode`, `NodeType`, `NodeInput`, `NodeUpdate`, `NodeFilter`
-  - `GraphEdge`, `RelationshipType`, `RelationshipInput`
-  - `TraversalOptions`, `TraversalDirection`, `TraversalResult`, `TraversalPath`
-  - `ProjectSnapshot`, `ProjectStats`
-  - `SearchOptions`, `ContextSearchResult`, `ScoredNode`, `RetrievalSource`
-  - `MemoryMetadata`, `MemoryEntry`
-  - `GraphQuery`, `GraphQueryType`, `GraphResult`
-  - `CodeAnalysis`, `CodeAnalysisRequest`, `ComplexityScore`, `SymbolInfo`, `SearchResult`
-  - `Embedding`, `Embedder` trait
-- **MCP Layer** — MCP client, tool definitions, and external server connections
-- **Progress Types** — `ProgressUpdate` and `ProgressStatus`
-- **Actor Wiring Diagram** — How the actors are spawned and connected in `main.rs`
+| Document | Replaced By |
+|----------|-------------|
+| `agent-infrastructure.md` | `actors-and-messages.md` + `graph-schema.md` |
+| `agent-implementation-instructions.md` | `actors-and-messages.md` + root README |
+| `vscode-environment-model.md` | `extension-core-interface.md` |
 
 ---
 
 ## Related
 
-- [Root README](../README.md) — Project overview and quick start
+- [Root README](../README.md) — Project overview, architecture, and quick start
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — Contribution guidelines

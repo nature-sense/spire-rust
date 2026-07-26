@@ -84,12 +84,36 @@ pub fn parse_cargo(project_root: &Path) -> Option<BuildMetadata> {
             is_workspace,
             workspace_members,
             scripts: vec![
-                BuildScript { name: "build".to_string(), command: "cargo build".to_string() },
-                BuildScript { name: "test".to_string(), command: "cargo test".to_string() },
-                BuildScript { name: "run".to_string(), command: "cargo run".to_string() },
-                BuildScript { name: "check".to_string(), command: "cargo check".to_string() },
-                BuildScript { name: "clippy".to_string(), command: "cargo clippy".to_string() },
-                BuildScript { name: "fmt".to_string(), command: "cargo fmt".to_string() },
+                BuildScript {
+                    name: "build".to_string(),
+                    command: "cargo build".to_string(),
+                    tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "debug"}})),
+                },
+                BuildScript {
+                    name: "test".to_string(),
+                    command: "cargo test".to_string(),
+                    tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "test"}})),
+                },
+                BuildScript {
+                    name: "run".to_string(),
+                    command: "cargo run".to_string(),
+                    tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "run"}})),
+                },
+                BuildScript {
+                    name: "check".to_string(),
+                    command: "cargo check".to_string(),
+                    tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "check"}})),
+                },
+                BuildScript {
+                    name: "clippy".to_string(),
+                    command: "cargo clippy".to_string(),
+                    tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "clippy"}})),
+                },
+                BuildScript {
+                    name: "fmt".to_string(),
+                    command: "cargo fmt".to_string(),
+                    tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "fmt"}})),
+                },
             ],
             features,
             targets,
@@ -133,8 +157,16 @@ pub fn parse_cargo(project_root: &Path) -> Option<BuildMetadata> {
         is_workspace,
         workspace_members: vec![],
         scripts: vec![
-            BuildScript { name: "build".to_string(), command: "cargo build".to_string() },
-            BuildScript { name: "test".to_string(), command: "cargo test".to_string() },
+            BuildScript {
+                name: "build".to_string(),
+                command: "cargo build".to_string(),
+                tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "debug"}})),
+            },
+            BuildScript {
+                name: "test".to_string(),
+                command: "cargo test".to_string(),
+                tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "test"}})),
+            },
         ],
         features: vec![],
         targets: vec![],

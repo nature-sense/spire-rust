@@ -75,5 +75,9 @@ glob-match = "0.2"
 # Regex (for parsing XML tool calls from DeepSeek)
 regex = "1"
 
+# CPU count detection (for generic build commands)
+num_cpus = "1"
+
 [dev-dependencies]
 tracing-test = "0.2"
+tempfile = "3"

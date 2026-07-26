@@ -59,7 +59,11 @@ export const chatHandlers: Record<string, MethodHandler> = {
     const { chatId, content, options } = params as {
       chatId: string;
       content: string;
-      options?: { role?: ChatMessage['role']; metadata?: Record<string, unknown> };
+      options?: {
+        role?: ChatMessage['role'];
+        metadata?: Record<string, unknown>;
+        widget?: ChatMessage['widget'];
+      };
     };
     let chat = chats.get(chatId);
     if (!chat) {
@@ -82,6 +86,7 @@ export const chatHandlers: Record<string, MethodHandler> = {
       content,
       timestamp: new Date().toISOString(),
       metadata: options?.metadata,
+      widget: options?.widget,
     };
 
     chat.messages.push(message);
@@ -119,5 +124,21 @@ export const chatHandlers: Record<string, MethodHandler> = {
   'chat/show': async (_params: unknown) => {
     // In a real implementation, this would call vscode.commands.executeCommand
     // to focus the chat panel
+  },
+
+  /**
+   * Handle widget interaction (radio selection, checkbox toggle, etc.).
+   * The webview calls this when a user interacts with a widget.
+   * Forwards to the subprocess which updates widget state and emits
+   * event/widget/update notifications back to the webview.
+   */
+  'widget/interact': async (params: unknown) => {
+    const { widgetId, value } = params as { widgetId: string; value: unknown };
+    // In a full implementation, this would forward to the Rust subprocess
+    // via the bidirectional client. For now, we acknowledge the interaction.
+    if (notifyChatEvent) {
+      notifyChatEvent('event/widget/interact', { widgetId, value });
+    }
+    return { acknowledged: true, widgetId, value };
   },
 };

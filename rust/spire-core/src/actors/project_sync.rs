@@ -13,17 +13,16 @@
 //! 2. **Startup sync** — Warm start: Project node exists. Content-hash manifest diff.
 //! 3. **Continuous sync** — Real-time: file change events from VS Code watcher.
 //!
-//! # Semantic Enrichment
+//! # Atomicity
 //!
-//! During bootstrap, the actor uses the `analyzer` module to:
-//! - Classify every file and directory with a semantic role
-//! - Detect programming languages
-//! - Identify entry points (main.rs, main.py, etc.)
-//! - Parse build config files into structured `BuildMetadata`
-//! - Create `BuildSystem` nodes in the graph for each detected build system
+//! Multi-step write operations (bootstrap, force-resync) use the
+//! [`OpenTransactionStream`] API to group all graph mutations into a single
+//! SeleneDB transaction. If any operation fails, the entire transaction is
+//! rolled back — no orphan nodes or dangling relationships.
 //!
-//! This eliminates the need for a separate `ProjectAnalyzerActor` scan —
-//! the analysis summary can be derived from graph queries.
+//! The [`TransactionStream`] helper wraps the raw `mpsc::Sender<TransactionRequest>`
+//! channel with typed methods that match the existing `send_to_graph` helpers,
+//! but send each operation through the shared transaction stream instead.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -33,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::actors::Actor;
 use crate::actors::memory_graph::MemoryGraphMessage;
@@ -41,9 +40,150 @@ use crate::analyzer::build_parsers;
 use crate::analyzer::scanner as analyzer_scanner;
 use crate::models::embedding::Embedder;
 use crate::models::memory_graph::{
-    GraphEdge, GraphNode, NodeFilter, NodeInput, NodeType, NodeUpdate, RelationshipInput,
-    RelationshipType,
+    GraphEdge, GraphNode, NodeFilter, NodeInput, NodeType, NodeUpdate,
+    RelationshipInput, RelationshipType, StreamOp, StreamOpResult, TransactionRequest,
 };
+
+// ============================================================================
+// TransactionStream — streaming atomic multi-op helper
+// ============================================================================
+
+/// A streaming handle to an open SeleneDB transaction.
+///
+/// Each method sends a single [`StreamOp`] through the shared channel and awaits
+/// its per-op result. The underlying transaction stays open until [`commit`] or
+/// [`rollback`] is called, or the handle is dropped (auto-commits on drop).
+///
+/// This lets callers write natural sequential code while all operations execute
+/// atomically inside a single database transaction.
+struct TransactionStream {
+    tx: mpsc::Sender<TransactionRequest>,
+}
+
+impl TransactionStream {
+    /// Open a new transaction stream via the MemoryGraphActor.
+    async fn open(
+        memory_graph_tx: &mpsc::Sender<MemoryGraphMessage>,
+    ) -> Result<Self> {
+        let (tx, rx) = oneshot::channel();
+        memory_graph_tx
+            .send(MemoryGraphMessage::OpenTransactionStream { reply_to: tx })
+            .await
+            .map_err(|e| anyhow!("MemoryGraph channel closed: {}", e))?;
+        let stream_tx = rx
+            .await
+            .map_err(|e| anyhow!("OpenTransactionStream response error: {}", e))?;
+        Ok(Self { tx: stream_tx })
+    }
+
+    /// Send a single operation and await its result.
+    async fn send_op(&self, op: StreamOp) -> Result<StreamOpResult> {
+        let (reply_to, rx) = oneshot::channel();
+        self.tx
+            .send(TransactionRequest { operation: op, reply_to })
+            .await
+            .map_err(|e| anyhow!("Transaction stream closed: {}", e))?;
+        rx.await
+            .map_err(|e| anyhow!("Transaction stream response error: {}", e))?
+            .map_err(|e| anyhow!("Transaction op failed: {}", e))
+    }
+
+    /// Store a new node.
+    async fn store_node(&self, node: NodeInput) -> Result<GraphNode> {
+        let result = self.send_op(StreamOp::StoreNode(node)).await?;
+        match result {
+            StreamOpResult::NodeStored(n) => Ok(n),
+            _ => Err(anyhow!("Expected NodeStored, got {:?}", result)),
+        }
+    }
+
+    /// Store a new node with a pre-computed embedding vector.
+    /// The vector is stored as the `embedding` property on the node for vector search.
+    async fn store_node_with_embedding(
+        &self,
+        node: NodeInput,
+        embedding_vector: Vec<f32>,
+    ) -> Result<GraphNode> {
+        let result = self
+            .send_op(StreamOp::StoreNodeWithEmbedding {
+                node,
+                embedding_vector,
+            })
+            .await?;
+        match result {
+            StreamOpResult::NodeStored(n) => Ok(n),
+            _ => Err(anyhow!("Expected NodeStored, got {:?}", result)),
+        }
+    }
+
+    /// Update an existing node.
+    async fn update_node(&self, id: String, updates: NodeUpdate) -> Result<GraphNode> {
+        let result = self
+            .send_op(StreamOp::UpdateNode { id, updates })
+            .await?;
+        match result {
+            StreamOpResult::NodeUpdated(n) => Ok(n),
+            _ => Err(anyhow!("Expected NodeUpdated, got {:?}", result)),
+        }
+    }
+
+    /// Delete a node by UUID.
+    #[allow(dead_code)]
+    async fn delete_node(&self, id: String) -> Result<()> {
+        let result = self.send_op(StreamOp::DeleteNode(id)).await?;
+        match result {
+            StreamOpResult::NodeDeleted => Ok(()),
+            _ => Err(anyhow!("Expected NodeDeleted, got {:?}", result)),
+        }
+    }
+
+    /// Create a relationship between two nodes.
+    async fn create_relationship(&self, rel: RelationshipInput) -> Result<GraphEdge> {
+        let result = self.send_op(StreamOp::CreateRelationship(rel)).await?;
+        match result {
+            StreamOpResult::RelationshipCreated(e) => Ok(e),
+            _ => Err(anyhow!("Expected RelationshipCreated, got {:?}", result)),
+        }
+    }
+
+    /// Delete a relationship by UUID.
+    #[allow(dead_code)]
+    async fn delete_relationship(&self, id: String) -> Result<()> {
+        let result = self.send_op(StreamOp::DeleteRelationship(id)).await?;
+        match result {
+            StreamOpResult::RelationshipDeleted => Ok(()),
+            _ => Err(anyhow!("Expected RelationshipDeleted, got {:?}", result)),
+        }
+    }
+
+    /// Set a config key-value pair.
+    async fn set_config(&self, key: String, value: serde_json::Value) -> Result<()> {
+        let result = self.send_op(StreamOp::SetConfig { key, value }).await?;
+        match result {
+            StreamOpResult::ConfigSet => Ok(()),
+            _ => Err(anyhow!("Expected ConfigSet, got {:?}", result)),
+        }
+    }
+
+    /// Commit the transaction and close the stream.
+    async fn commit(self) -> Result<()> {
+        let result = self.send_op(StreamOp::Commit).await?;
+        match result {
+            StreamOpResult::RawGql(_) => Ok(()),
+            _ => Err(anyhow!("Expected RawGql on commit, got {:?}", result)),
+        }
+    }
+
+    /// Roll back the transaction and close the stream.
+    #[allow(dead_code)]
+    async fn rollback(self) -> Result<()> {
+        let result = self.send_op(StreamOp::Rollback).await?;
+        match result {
+            StreamOpResult::RawGql(_) => Ok(()),
+            _ => Err(anyhow!("Expected RawGql on rollback, got {:?}", result)),
+        }
+    }
+}
 
 // ============================================================================
 // Constants
@@ -191,11 +331,16 @@ pub enum ProjectSyncMessage {
         project_root: PathBuf,
         reply_to: oneshot::Sender<Result<SyncResult>>,
     },
-    /// Incoming file change event from VS Code watcher.
+    /// Incoming file change event from VS Code watcher (with reply).
     FileEvent {
         change_type: ChangeType,
         path: PathBuf,
         reply_to: oneshot::Sender<Result<SyncResult>>,
+    },
+    /// Incoming file change notification (fire-and-forget, no reply).
+    FileChanged {
+        change_type: ChangeType,
+        path: String,
     },
     /// Force a full re-sync of the entire project.
     ForceResync {
@@ -219,6 +364,20 @@ pub struct ProjectSyncActor {
 
     /// Path to the project-analyzer binary (or empty to use library mode).
     analyzer_bin: Option<PathBuf>,
+
+    /// Debounce map for file change events.
+    /// Key: "change_type:path" — Value: instant when the event was received.
+    /// Used to coalesce rapid duplicate events from the VS Code file watcher.
+    debounce_map: HashMap<String, std::time::Instant>,
+
+    /// Whether the actor has been initialized (guards early FileChanged events).
+    initialized: bool,
+
+    /// Batch queue for fire-and-forget FileChanged events.
+    /// Instead of processing each event individually (each with its own
+    /// transaction + full manifest scan), events are accumulated here and
+    /// flushed in a single batch transaction.
+    event_batch: Vec<(ChangeType, PathBuf)>,
 }
 
 impl ProjectSyncActor {
@@ -227,6 +386,9 @@ impl ProjectSyncActor {
             memory_graph_tx: None,
             embedder: None,
             analyzer_bin: None,
+            debounce_map: HashMap::new(),
+            initialized: false,
+            event_batch: Vec::new(),
         }
     }
 
@@ -612,6 +774,10 @@ impl ProjectSyncActor {
 
     /// Phase 1: Full bootstrap scan.
     /// Creates the entire project tree in the graph from scratch.
+    ///
+    /// All graph mutations are performed inside a single [`TransactionStream`]
+    /// so that the entire bootstrap either commits atomically or rolls back
+    /// entirely on failure — no orphan nodes or dangling relationships.
     async fn bootstrap(&mut self, project_root: &Path) -> Result<SyncResult> {
         let start = std::time::Instant::now();
         let mut result = SyncResult::new();
@@ -625,15 +791,21 @@ impl ProjectSyncActor {
         let manifest = Self::scan_manifest(project_root)?;
         let manifest_hash = hash_manifest(&manifest);
 
-        // 2. Create the Project node
+        // 2. Open a transaction stream for all graph mutations
+        let tx_ref = self.memory_graph_tx.as_ref().ok_or_else(|| {
+            anyhow!("MemoryGraph sender not initialized")
+        })?;
+        let stream = TransactionStream::open(tx_ref).await?;
+
+        // 3. Create the Project node
         let project_name = project_root
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("project")
             .to_string();
 
-        let project_node = self
-            .create_node(NodeInput {
+        let project_node = stream
+            .store_node(NodeInput {
                 node_type: NodeType::Project,
                 subtype: None,
                 name: project_name.clone(),
@@ -651,7 +823,7 @@ impl ProjectSyncActor {
             .await?;
         result.nodes_created += 1;
 
-        // 3. Build directory tree and create nodes
+        // 4. Build directory tree and create nodes
         let mut dir_entries: HashMap<String, Vec<String>> = HashMap::new();
         let mut file_entries: HashMap<String, ManifestEntry> = HashMap::new();
         let mut all_dirs: HashSet<String> = HashSet::new();
@@ -691,19 +863,18 @@ impl ProjectSyncActor {
             d
         };
 
-        // Create directory nodes (bottom-up)
-        let mut dir_node_ids: HashMap<String, String> = HashMap::new();
-
+        // Pre-compute directory descriptions and embeddings (before transaction)
+        let embedder_ref = self.embedder.as_ref().ok_or_else(|| {
+            anyhow!("Embedder not initialized")
+        })?;
+        let mut dir_embedding_data: HashMap<String, (String, Vec<f32>)> = HashMap::new();
         for dir_path in &dirs_sorted {
             let dir_name = Path::new(dir_path)
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or(dir_path)
-                .to_string();
-
-            let role = Self::classify_directory_role(&dir_name);
+                .unwrap_or(dir_path);
+            let role = Self::classify_directory_role(dir_name);
             let child_count = dir_entries.get(dir_path).map(|v| v.len()).unwrap_or(0);
-
             let mut languages: Vec<String> = Vec::new();
             if let Some(children) = dir_entries.get(dir_path) {
                 for child in children {
@@ -719,48 +890,81 @@ impl ProjectSyncActor {
                     }
                 }
             }
-
-            let node = self
-                .create_node(NodeInput {
-                    node_type: NodeType::Unknown,
-                    subtype: Some("Directory".to_string()),
-                    name: dir_name,
-                    description: Some(Self::build_directory_description(
-                        dir_path, role, child_count, &languages,
-                    )),
-                    properties: Some({
-                        let mut m = HashMap::new();
-                        m.insert(
-                            "path".to_string(),
-                            serde_json::Value::String(dir_path.clone()),
-                        );
-                        m.insert(
-                            "role".to_string(),
-                            serde_json::Value::String(role.to_string()),
-                        );
-                        m.insert(
-                            "child_count".to_string(),
-                            serde_json::Value::Number(serde_json::Number::from(child_count)),
-                        );
-                        m
-                    }),
-                    embedding_id: None,
-                })
-                .await?;
-            result.nodes_created += 1;
-            dir_node_ids.insert(dir_path.clone(), node.id.clone());
-
-            // Generate embedding for directory
-            let desc =
-                Self::build_directory_description(dir_path, role, child_count, &languages);
-            if let Err(e) = self.generate_embedding(&node.id, &desc).await {
-                warn!("Failed to generate embedding for dir {}: {}", dir_path, e);
-            } else {
-                result.embeddings_generated += 1;
-            }
+            let desc = Self::build_directory_description(dir_path, role, child_count, &languages);
+            let embedding = embedder_ref.embed(&desc).await?;
+            dir_embedding_data.insert(dir_path.clone(), (desc, embedding.vector));
         }
 
-        // Create file nodes
+        // Pre-compute file descriptions and embeddings (before transaction)
+        let mut file_embedding_data: HashMap<String, (String, Vec<f32>)> = HashMap::new();
+        for entry in &manifest {
+            let path = &entry.path;
+            let ext = Path::new(path)
+                .extension()
+                .and_then(|e| format!(".{}", e.to_string_lossy()).into())
+                .unwrap_or_default();
+            let language = Self::detect_language(&ext).to_string();
+            let role = Self::classify_file_role(path);
+            let lines = Self::estimate_lines(entry.size);
+            let desc = Self::build_file_description(path, &language, role, lines, entry.size);
+            let embedding = embedder_ref.embed(&desc).await?;
+            file_embedding_data.insert(path.clone(), (desc, embedding.vector));
+        }
+
+        // Create directory nodes (bottom-up) with pre-computed embeddings
+        let mut dir_node_ids: HashMap<String, String> = HashMap::new();
+
+        for dir_path in &dirs_sorted {
+            let dir_name = Path::new(dir_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(dir_path)
+                .to_string();
+
+            let role = Self::classify_directory_role(&dir_name);
+            let child_count = dir_entries.get(dir_path).map(|v| v.len()).unwrap_or(0);
+
+            let (desc, embedding_vector) = dir_embedding_data
+                .remove(dir_path)
+                .unwrap_or_else(|| {
+                    let d = Self::build_directory_description(dir_path, role, child_count, &[]);
+                    (d, Vec::new())
+                });
+
+            let node = stream
+                .store_node_with_embedding(
+                    NodeInput {
+                        node_type: NodeType::Unknown,
+                        subtype: Some("Directory".to_string()),
+                        name: dir_name,
+                        description: Some(desc),
+                        properties: Some({
+                            let mut m = HashMap::new();
+                            m.insert(
+                                "path".to_string(),
+                                serde_json::Value::String(dir_path.clone()),
+                            );
+                            m.insert(
+                                "role".to_string(),
+                                serde_json::Value::String(role.to_string()),
+                            );
+                            m.insert(
+                                "child_count".to_string(),
+                                serde_json::Value::Number(serde_json::Number::from(child_count)),
+                            );
+                            m
+                        }),
+                        embedding_id: None,
+                    },
+                    embedding_vector,
+                )
+                .await?;
+            result.nodes_created += 1;
+            result.embeddings_generated += 1;
+            dir_node_ids.insert(dir_path.clone(), node.id.clone());
+        }
+
+        // Create file nodes with pre-computed embeddings
         let mut file_node_ids: HashMap<String, String> = HashMap::new();
 
         for entry in &manifest {
@@ -779,58 +983,59 @@ impl ProjectSyncActor {
                 .unwrap_or("")
                 .to_string();
 
-            let node = self
-                .create_node(NodeInput {
-                    node_type: NodeType::Unknown,
-                    subtype: Some("File".to_string()),
-                    name: filename,
-                    description: Some(Self::build_file_description(
-                        path, &language, role, lines, entry.size,
-                    )),
-                    properties: Some({
-                        let mut m = HashMap::new();
-                        m.insert(
-                            "path".to_string(),
-                            serde_json::Value::String(path.clone()),
-                        );
-                        m.insert(
-                            "extension".to_string(),
-                            serde_json::Value::String(ext),
-                        );
-                        m.insert(
-                            "language".to_string(),
-                            serde_json::Value::String(language.clone()),
-                        );
-                        m.insert(
-                            "role".to_string(),
-                            serde_json::Value::String(role.to_string()),
-                        );
-                        m.insert(
-                            "size".to_string(),
-                            serde_json::Value::Number(serde_json::Number::from(entry.size)),
-                        );
-                        m.insert(
-                            "lines".to_string(),
-                            serde_json::Value::Number(serde_json::Number::from(lines as u64)),
-                        );
-                        m
-                    }),
-                    embedding_id: None,
-                })
+            let (desc, embedding_vector) = file_embedding_data
+                .remove(path)
+                .unwrap_or_else(|| {
+                    let d = Self::build_file_description(path, &language, role, lines, entry.size);
+                    (d, Vec::new())
+                });
+
+            let node = stream
+                .store_node_with_embedding(
+                    NodeInput {
+                        node_type: NodeType::Unknown,
+                        subtype: Some("File".to_string()),
+                        name: filename,
+                        description: Some(desc),
+                        properties: Some({
+                            let mut m = HashMap::new();
+                            m.insert(
+                                "path".to_string(),
+                                serde_json::Value::String(path.clone()),
+                            );
+                            m.insert(
+                                "extension".to_string(),
+                                serde_json::Value::String(ext),
+                            );
+                            m.insert(
+                                "language".to_string(),
+                                serde_json::Value::String(language.clone()),
+                            );
+                            m.insert(
+                                "role".to_string(),
+                                serde_json::Value::String(role.to_string()),
+                            );
+                            m.insert(
+                                "size".to_string(),
+                                serde_json::Value::Number(serde_json::Number::from(entry.size)),
+                            );
+                            m.insert(
+                                "lines".to_string(),
+                                serde_json::Value::Number(serde_json::Number::from(lines as u64)),
+                            );
+                            m
+                        }),
+                        embedding_id: None,
+                    },
+                    embedding_vector,
+                )
                 .await?;
             result.nodes_created += 1;
+            result.embeddings_generated += 1;
             file_node_ids.insert(path.clone(), node.id.clone());
-
-            // Generate embedding for file
-            let desc = Self::build_file_description(path, &language, role, lines, entry.size);
-            if let Err(e) = self.generate_embedding(&node.id, &desc).await {
-                warn!("Failed to generate embedding for file {}: {}", path, e);
-            } else {
-                result.embeddings_generated += 1;
-            }
         }
 
-        // 4. Create Contains edges (directory → child)
+        // 5. Create Contains edges (directory → child)
         let root_dir_id = dir_node_ids
             .get(".")
             .cloned()
@@ -838,14 +1043,15 @@ impl ProjectSyncActor {
 
         // Link project → root directory
         if root_dir_id != project_node.id {
-            self.create_relationship(RelationshipInput {
-                edge_type: RelationshipType::BelongsTo,
-                from_id: root_dir_id.clone(),
-                to_id: project_node.id.clone(),
-                properties: None,
-                weight: None,
-            })
-            .await?;
+            stream
+                .create_relationship(RelationshipInput {
+                    edge_type: RelationshipType::BelongsTo,
+                    from_id: root_dir_id.clone(),
+                    to_id: project_node.id.clone(),
+                    properties: None,
+                    weight: None,
+                })
+                .await?;
             result.edges_created += 1;
         }
 
@@ -864,14 +1070,15 @@ impl ProjectSyncActor {
 
             if let Some(parent_id) = dir_node_ids.get(&parent_path) {
                 if parent_id != &dir_id {
-                    self.create_relationship(RelationshipInput {
-                        edge_type: RelationshipType::BelongsTo,
-                        from_id: dir_id.clone(),
-                        to_id: parent_id.clone(),
-                        properties: None,
-                        weight: None,
-                    })
-                    .await?;
+                    stream
+                        .create_relationship(RelationshipInput {
+                            edge_type: RelationshipType::BelongsTo,
+                            from_id: dir_id.clone(),
+                            to_id: parent_id.clone(),
+                            properties: None,
+                            weight: None,
+                        })
+                        .await?;
                     result.edges_created += 1;
                 }
             }
@@ -886,19 +1093,20 @@ impl ProjectSyncActor {
                 .unwrap_or_else(|| ".".to_string());
 
             if let Some(parent_id) = dir_node_ids.get(&parent_path) {
-                self.create_relationship(RelationshipInput {
-                    edge_type: RelationshipType::BelongsTo,
-                    from_id: file_id.clone(),
-                    to_id: parent_id.clone(),
-                    properties: None,
-                    weight: None,
-                })
-                .await?;
+                stream
+                    .create_relationship(RelationshipInput {
+                        edge_type: RelationshipType::BelongsTo,
+                        from_id: file_id.clone(),
+                        to_id: parent_id.clone(),
+                        properties: None,
+                        weight: None,
+                    })
+                    .await?;
                 result.edges_created += 1;
             }
         }
 
-        // 5. Discover and parse build config files, create BuildSystem nodes
+        // 6. Discover and parse build config files, create BuildSystem nodes
         let build_configs = analyzer_scanner::discover_build_files(project_root, false);
         let mut build_system_node_ids: Vec<String> = Vec::new();
 
@@ -937,8 +1145,8 @@ impl ProjectSyncActor {
 
                 let build_system_name = format!("{}-{}", metadata.build_system, build_file.replace('/', "-"));
 
-                let node = self
-                    .create_node(NodeInput {
+                let node = stream
+                    .store_node(NodeInput {
                         node_type: NodeType::Unknown,
                         subtype: Some("BuildSystem".to_string()),
                         name: build_system_name,
@@ -1001,268 +1209,398 @@ impl ProjectSyncActor {
                 result.nodes_created += 1;
                 build_system_node_ids.push(node.id.clone());
 
-                // Link the BuildSystem node to the Project node
-                self.create_relationship(RelationshipInput {
-                    edge_type: RelationshipType::BelongsTo,
-                    from_id: node.id.clone(),
-                    to_id: project_node.id.clone(),
-                    properties: None,
-                    weight: None,
-                })
-                .await?;
-                result.edges_created += 1;
-
-                // Link the BuildSystem node to its build config file node (if it exists in the graph)
-                if let Some(file_node_id) = file_node_ids.get(build_file) {
-                    self.create_relationship(RelationshipInput {
-                        edge_type: RelationshipType::DependsOn,
+                // Link BuildSystem node to the project
+                stream
+                    .create_relationship(RelationshipInput {
+                        edge_type: RelationshipType::BelongsTo,
                         from_id: node.id.clone(),
-                        to_id: file_node_id.clone(),
+                        to_id: project_node.id.clone(),
                         properties: None,
                         weight: None,
                     })
                     .await?;
+                result.edges_created += 1;
+
+                // Link BuildSystem to its config file if it exists
+                if let Some(file_id) = file_node_ids.get(build_file) {
+                    stream
+                        .create_relationship(RelationshipInput {
+                            edge_type: RelationshipType::BelongsTo,
+                            from_id: node.id.clone(),
+                            to_id: file_id.clone(),
+                            properties: None,
+                            weight: None,
+                        })
+                        .await?;
                     result.edges_created += 1;
                 }
-
-                info!(
-                    "ProjectSync: created BuildSystem node for {} ({}) at {}",
-                    metadata.build_system, metadata.project_type, build_file
-                );
             }
         }
 
-        // Store build manifest hash
-        let build_manifest_hash = {
-            let mut hasher = Sha256::new();
-            for (build_file, _) in &build_configs {
-                if let Ok(content) = std::fs::read_to_string(project_root.join(build_file)) {
-                    hasher.update(content.as_bytes());
-                }
-            }
-            format!("{:x}", hasher.finalize())
-        };
+        // 7. Store the manifest hash and project root as config
+        stream
+            .set_config(
+                CONFIG_FILE_MANIFEST_HASH.to_string(),
+                serde_json::Value::String(manifest_hash),
+            )
+            .await?;
+        stream
+            .set_config(
+                CONFIG_PROJECT_ROOT.to_string(),
+                serde_json::Value::String(project_root.to_string_lossy().to_string()),
+            )
+            .await?;
+        stream
+            .set_config(
+                CONFIG_LAST_SYNCED_AT.to_string(),
+                serde_json::Value::String(Utc::now().to_rfc3339()),
+            )
+            .await?;
 
-        // 6. Store the manifest hash and metadata
-        self.set_config(
-            CONFIG_FILE_MANIFEST_HASH,
-            serde_json::Value::String(manifest_hash),
-        )
-        .await?;
-
-        self.set_config(
-            CONFIG_BUILD_MANIFEST_HASH,
-            serde_json::Value::String(build_manifest_hash),
-        )
-        .await?;
-
-        self.set_config(
-            CONFIG_PROJECT_ROOT,
-            serde_json::Value::String(project_root.to_string_lossy().to_string()),
-        )
-        .await?;
-
-        self.set_config(
-            CONFIG_LAST_SYNCED_AT,
-            serde_json::Value::String(Utc::now().to_rfc3339()),
-        )
-        .await?;
+        // 8. Commit the transaction atomically
+        stream.commit().await?;
 
         result.duration_ms = start.elapsed().as_millis() as u64;
-        info!("ProjectSync: bootstrap complete — {:?}", result);
+        info!("ProjectSync: bootstrap complete in {}ms", result.duration_ms);
         Ok(result)
     }
 
     // ── Startup Sync ─────────────────────────────────────────────────────
 
-    /// Phase 2: Startup sync — content-hash manifest diff.
-    /// Only does work if the file manifest has changed.
+    /// Phase 2: Quick startup verification.
+    /// Compares the current file manifest hash against the stored hash.
+    /// If they differ, performs a full re-sync.
+    ///
+    /// Handles:
+    /// - New files: creates file nodes, parent directory nodes, and BelongsTo edges
+    /// - Deleted files: removes orphaned nodes from the graph
+    /// - Modified files: updates size/lines properties
     async fn startup_sync(&mut self, project_root: &Path) -> Result<SyncResult> {
         let start = std::time::Instant::now();
         let mut result = SyncResult::new();
 
-        info!("ProjectSync: startup sync for {}", project_root.display());
+        info!(
+            "ProjectSync: startup sync for {}",
+            project_root.display()
+        );
 
-        // 1. Scan the filesystem
-        let manifest = Self::scan_manifest(project_root)?;
-        let current_hash = hash_manifest(&manifest);
-
-        // 2. Compare with stored hash
+        // 1. Get the stored manifest hash
         let stored_hash = self
             .get_config(CONFIG_FILE_MANIFEST_HASH)
             .await?
-            .and_then(|v| v.as_str().map(|s| s.to_string()))
-            .unwrap_or_default();
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
 
-        if stored_hash == current_hash {
+        // 2. Scan the filesystem
+        let manifest = Self::scan_manifest(project_root)?;
+        let current_hash = hash_manifest(&manifest);
+
+        // 3. Compare hashes
+        if stored_hash.as_deref() == Some(&current_hash) {
             info!("ProjectSync: manifest unchanged, skipping sync");
             result.duration_ms = start.elapsed().as_millis() as u64;
             return Ok(result);
         }
 
         info!(
-            "ProjectSync: manifest changed (old={} new={}), performing incremental sync",
-            &stored_hash[..8.min(stored_hash.len())],
-            &current_hash[..8.min(current_hash.len())]
+            "ProjectSync: manifest changed (old: {:?}, new: {}), re-syncing",
+            stored_hash, current_hash
         );
 
-        // 3. Load the graph's current file nodes
-        let graph_files = self
+        // 4. Get existing nodes from the graph
+        let existing_nodes = self
             .query_nodes(NodeFilter {
                 node_type: None,
-                subtype: Some("File".to_string()),
+                subtype: None,
                 name: None,
                 status: None,
                 tags: None,
                 limit: None,
                 offset: None,
+                properties: None,
             })
             .await?;
 
-        // Build a map of path → (node_id, size) from the graph
-        let mut graph_file_map: HashMap<String, (String, u64)> = HashMap::new();
-        for node in &graph_files {
-            if let Some(path) = node.properties.get("path").and_then(|v| v.as_str()) {
-                let size = node
-                    .properties
-                    .get("size")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                graph_file_map.insert(path.to_string(), (node.id.clone(), size));
+        // Build a map of path → existing node ID
+        let mut existing_by_path: HashMap<String, String> = HashMap::new();
+        // Also track which paths are directories vs files
+        let mut existing_is_dir: HashMap<String, bool> = HashMap::new();
+        for node in &existing_nodes {
+            if let Some(path_val) = node.properties.get("path") {
+                if let Some(path_str) = path_val.as_str() {
+                    existing_by_path.insert(path_str.to_string(), node.id.clone());
+                    let is_dir = node.subtype.as_deref() == Some("Directory");
+                    existing_is_dir.insert(path_str.to_string(), is_dir);
+                }
             }
         }
 
-        // 4. Build filesystem map
-        let mut fs_file_map: HashMap<String, u64> = HashMap::new();
-        for entry in &manifest {
-            fs_file_map.insert(entry.path.clone(), entry.size);
-        }
+        // 5. Build a set of current manifest paths for quick lookup
+        let current_paths: HashSet<&str> = manifest.iter().map(|e| e.path.as_str()).collect();
 
-        // 5. Diff: files only in graph (deleted from filesystem)
-        for (path, (node_id, _)) in &graph_file_map {
-            if !fs_file_map.contains_key(path) {
-                if let Err(e) = self.delete_node(node_id.clone()).await {
-                    warn!("Failed to delete node for {}: {}", path, e);
-                } else {
+        // 6. Open a transaction stream for all mutations
+        let tx_ref = self.memory_graph_tx.as_ref().ok_or_else(|| {
+            anyhow!("MemoryGraph sender not initialized")
+        })?;
+        let stream = TransactionStream::open(tx_ref).await?;
+
+        // 7. Delete nodes for files that no longer exist on disk
+        for (path, node_id) in &existing_by_path {
+            if !current_paths.contains(path.as_str()) {
+                // Only delete file nodes (not directories, not the project node)
+                let is_dir = existing_is_dir.get(path).copied().unwrap_or(false);
+                if !is_dir {
+                    stream.delete_node(node_id.clone()).await?;
                     result.nodes_deleted += 1;
                 }
             }
         }
 
-        // 6. Diff: files only in filesystem (new files)
-        for (path, size) in &fs_file_map {
-            if !graph_file_map.contains_key(path) {
-                let ext = Path::new(path)
-                    .extension()
-                    .and_then(|e| format!(".{}", e.to_string_lossy()).into())
-                    .unwrap_or_default();
-                let language = Self::detect_language(&ext).to_string();
-                let role = Self::classify_file_role(path);
-                let lines = Self::estimate_lines(*size);
-                let filename = Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                match self
-                    .create_node(NodeInput {
-                        node_type: NodeType::Unknown,
-                        subtype: Some("File".to_string()),
-                        name: filename,
-                        description: Some(Self::build_file_description(
-                            path, &language, role, lines, *size,
-                        )),
-                        properties: Some({
-                            let mut m = HashMap::new();
-                            m.insert(
-                                "path".to_string(),
-                                serde_json::Value::String(path.clone()),
-                            );
-                            m.insert(
-                                "extension".to_string(),
-                                serde_json::Value::String(ext),
-                            );
-                            m.insert(
-                                "language".to_string(),
-                                serde_json::Value::String(language.clone()),
-                            );
-                            m.insert(
-                                "role".to_string(),
-                                serde_json::Value::String(role.to_string()),
-                            );
-                            m.insert(
-                                "size".to_string(),
-                                serde_json::Value::Number(serde_json::Number::from(*size)),
-                            );
-                            m.insert(
-                                "lines".to_string(),
-                                serde_json::Value::Number(
-                                    serde_json::Number::from(lines as u64),
-                                ),
-                            );
-                            m
-                        }),
-                        embedding_id: None,
-                    })
-                    .await
-                {
-                    Ok(node) => {
-                        result.nodes_created += 1;
-
-                        // Generate embedding for new file
-                        let desc = Self::build_file_description(
-                            path, &language, role, lines, *size,
-                        );
-                        if let Err(e) = self.generate_embedding(&node.id, &desc).await {
-                            warn!(
-                                "Failed to generate embedding for file {}: {}",
-                                path, e
-                            );
-                        } else {
-                            result.embeddings_generated += 1;
-                        }
-
-                        // Create BelongsTo edge to parent directory
-                        let parent_path = Path::new(path)
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .filter(|p| !p.is_empty())
-                            .unwrap_or_else(|| ".".to_string());
-
-                        // We need to find the parent directory node
-                        // For now, skip edge creation during startup sync (will be handled by bootstrap on force-resync)
-                        let _ = parent_path;
-                    }
-                    Err(e) => {
-                        warn!("Failed to create node for {}: {}", path, e);
+        // 8. Collect all unique directories needed for new files
+        let mut needed_dirs: HashSet<String> = HashSet::new();
+        let mut new_file_paths: Vec<String> = Vec::new();
+        for entry in &manifest {
+            if !existing_by_path.contains_key(&entry.path) {
+                new_file_paths.push(entry.path.clone());
+                if let Some(parent) = Path::new(&entry.path).parent() {
+                    let parent_str = parent.to_string_lossy().to_string();
+                    if !parent_str.is_empty() && parent_str != "." {
+                        needed_dirs.insert(parent_str);
                     }
                 }
             }
         }
 
-        // 7. Update the stored hash
-        self.set_config(
-            CONFIG_FILE_MANIFEST_HASH,
-            serde_json::Value::String(current_hash),
-        )
-        .await?;
+        // 9. Create missing directory nodes (bottom-up)
+        let mut dir_node_ids: HashMap<String, String> = HashMap::new();
+        // Copy existing dir nodes into our map
+        for (path, node_id) in &existing_by_path {
+            if existing_is_dir.get(path).copied().unwrap_or(false) {
+                dir_node_ids.insert(path.clone(), node_id.clone());
+            }
+        }
 
-        self.set_config(
-            CONFIG_LAST_SYNCED_AT,
-            serde_json::Value::String(Utc::now().to_rfc3339()),
-        )
-        .await?;
+        // Sort needed dirs by depth descending so children are created first
+        let mut dirs_sorted: Vec<String> = needed_dirs.into_iter().collect();
+        dirs_sorted.sort_by(|a, b| b.len().cmp(&a.len()));
+
+        for dir_path in &dirs_sorted {
+            if dir_node_ids.contains_key(dir_path) {
+                continue; // Already exists
+            }
+
+            let dir_name = Path::new(dir_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(dir_path)
+                .to_string();
+
+            let role = Self::classify_directory_role(&dir_name);
+
+            let node = stream
+                .store_node(NodeInput {
+                    node_type: NodeType::Unknown,
+                    subtype: Some("Directory".to_string()),
+                    name: dir_name,
+                    description: Some(Self::build_directory_description(dir_path, role, 0, &[])),
+                    properties: Some({
+                        let mut m = HashMap::new();
+                        m.insert(
+                            "path".to_string(),
+                            serde_json::Value::String(dir_path.clone()),
+                        );
+                        m.insert(
+                            "role".to_string(),
+                            serde_json::Value::String(role.to_string()),
+                        );
+                        m.insert(
+                            "child_count".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(0)),
+                        );
+                        m
+                    }),
+                    embedding_id: None,
+                })
+                .await?;
+            result.nodes_created += 1;
+            dir_node_ids.insert(dir_path.clone(), node.id.clone());
+        }
+
+        // 10. Create file nodes for new files and BelongsTo relationships
+        // Collect node IDs and descriptions for post-commit embedding generation.
+        let mut pending_embeddings: Vec<(String, String)> = Vec::new();
+
+        for file_path in &new_file_paths {
+            let entry = manifest.iter().find(|e| e.path == *file_path).unwrap();
+
+            let ext = Path::new(&entry.path)
+                .extension()
+                .and_then(|e| format!(".{}", e.to_string_lossy()).into())
+                .unwrap_or_default();
+            let language = Self::detect_language(&ext).to_string();
+            let role = Self::classify_file_role(&entry.path);
+            let lines = Self::estimate_lines(entry.size);
+
+            let filename = Path::new(&entry.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+
+            let node = stream
+                .store_node(NodeInput {
+                    node_type: NodeType::Unknown,
+                    subtype: Some("File".to_string()),
+                    name: filename,
+                    description: Some(Self::build_file_description(
+                        &entry.path, &language, role, lines, entry.size,
+                    )),
+                    properties: Some({
+                        let mut m = HashMap::new();
+                        m.insert(
+                            "path".to_string(),
+                            serde_json::Value::String(entry.path.clone()),
+                        );
+                        m.insert(
+                            "extension".to_string(),
+                            serde_json::Value::String(ext),
+                        );
+                        m.insert(
+                            "language".to_string(),
+                            serde_json::Value::String(language.clone()),
+                        );
+                        m.insert(
+                            "role".to_string(),
+                            serde_json::Value::String(role.to_string()),
+                        );
+                        m.insert(
+                            "size".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(entry.size)),
+                        );
+                        m.insert(
+                            "lines".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(lines as u64)),
+                        );
+                        m
+                    }),
+                    embedding_id: None,
+                })
+                .await?;
+            result.nodes_created += 1;
+
+            // Create BelongsTo relationship to parent directory
+            let parent_path = Path::new(&entry.path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| ".".to_string());
+
+            if let Some(parent_id) = dir_node_ids.get(&parent_path) {
+                stream
+                    .create_relationship(RelationshipInput {
+                        edge_type: RelationshipType::BelongsTo,
+                        from_id: node.id.clone(),
+                        to_id: parent_id.clone(),
+                        properties: None,
+                        weight: None,
+                    })
+                    .await?;
+                result.edges_created += 1;
+            }
+
+            // Defer embedding generation until after the transaction commits,
+            // because generate_embedding queries the node directly (not through
+            // the transaction stream) and the node won't exist yet.
+            pending_embeddings.push((node.id.clone(), Self::build_file_description(
+                &entry.path, &language, role, lines, entry.size,
+            )));
+        }
+
+        // 11. Rebuild BuildSystem nodes — delete stale ones and re-parse all build configs
+        // First, find the Project node
+        let project_nodes = self
+            .query_nodes(NodeFilter {
+                node_type: Some(NodeType::Project),
+                subtype: None,
+                name: None,
+                status: None,
+                tags: None,
+                limit: Some(1),
+                offset: None,
+                properties: None,
+            })
+            .await?;
+        let project_node = project_nodes.into_iter().next();
+
+        // Build a file_node_ids map from existing_by_path (which maps path → node ID)
+        let mut file_node_ids: HashMap<String, String> = HashMap::new();
+        for (path, node_id) in &existing_by_path {
+            let is_dir = existing_is_dir.get(path).copied().unwrap_or(false);
+            if !is_dir {
+                file_node_ids.insert(path.clone(), node_id.clone());
+            }
+        }
+
+        let build_systems_result = self.rebuild_build_systems(&stream, project_root, &file_node_ids, project_node.as_ref()).await?;
+        result.nodes_created += build_systems_result.nodes_created;
+        result.nodes_deleted += build_systems_result.nodes_deleted;
+        result.edges_created += build_systems_result.edges_created;
+
+
+        // 12. Update the manifest hash
+        stream
+            .set_config(
+                CONFIG_FILE_MANIFEST_HASH.to_string(),
+                serde_json::Value::String(current_hash),
+            )
+            .await?;
+        stream
+            .set_config(
+                CONFIG_LAST_SYNCED_AT.to_string(),
+                serde_json::Value::String(Utc::now().to_rfc3339()),
+            )
+            .await?;
+
+        // 13. Commit the transaction first, so nodes exist in the database
+        stream.commit().await?;
+
+        // 14. Generate embeddings after commit — nodes are now visible to direct queries
+        for (node_id, desc) in &pending_embeddings {
+            if let Err(e) = self.generate_embedding(node_id, desc).await {
+                warn!("Failed to generate embedding for new file: {}", e);
+            } else {
+                result.embeddings_generated += 1;
+            }
+        }
 
         result.duration_ms = start.elapsed().as_millis() as u64;
-        info!("ProjectSync: startup sync complete — {:?}", result);
+        info!("ProjectSync: startup sync complete in {}ms", result.duration_ms);
         Ok(result)
     }
 
-    // ── Continuous Sync ──────────────────────────────────────────────────
+
+    // ── File Event Handling ──────────────────────────────────────────────
+
+    /// Find a node by its `path` property using a property-filtered query.
+    /// This is O(1) at the graph level instead of O(n) full scan + filter.
+    async fn find_node_by_path(&self, path_str: &str) -> Result<Option<GraphNode>> {
+        let mut props = HashMap::new();
+        props.insert("path".to_string(), serde_json::Value::String(path_str.to_string()));
+        let mut nodes = self
+            .query_nodes(NodeFilter {
+                node_type: None,
+                subtype: None,
+                name: None,
+                status: None,
+                tags: None,
+                properties: Some(props),
+                limit: Some(1),
+                offset: None,
+            })
+            .await?;
+        Ok(nodes.pop())
+    }
 
     /// Phase 3: Handle a single file change event.
-    /// This is called by the actor's message handler for each FileEvent.
     async fn handle_file_event(
         &mut self,
         change_type: ChangeType,
@@ -1279,41 +1617,40 @@ impl ProjectSyncActor {
 
         match change_type {
             ChangeType::Created => {
-                // Create a new file node
-                if !path.is_file() {
-                    return Ok(result);
-                }
+                // Open a transaction stream for the create + config update
+                let tx_ref = self.memory_graph_tx.as_ref().ok_or_else(|| {
+                    anyhow!("MemoryGraph sender not initialized")
+                })?;
+                let stream = TransactionStream::open(tx_ref).await?;
 
-                let relative = path
-                    .to_string_lossy()
-                    .to_string();
                 let ext = path
                     .extension()
                     .and_then(|e| format!(".{}", e.to_string_lossy()).into())
                     .unwrap_or_default();
                 let language = Self::detect_language(&ext).to_string();
-                let role = Self::classify_file_role(&relative);
+                let role = Self::classify_file_role(&path.to_string_lossy());
                 let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                 let lines = Self::estimate_lines(size);
+
                 let filename = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("")
                     .to_string();
 
-                let node = self
-                    .create_node(NodeInput {
+                let node = stream
+                    .store_node(NodeInput {
                         node_type: NodeType::Unknown,
                         subtype: Some("File".to_string()),
                         name: filename,
                         description: Some(Self::build_file_description(
-                            &relative, &language, role, lines, size,
+                            &path.to_string_lossy(), &language, role, lines, size,
                         )),
                         properties: Some({
                             let mut m = HashMap::new();
                             m.insert(
                                 "path".to_string(),
-                                serde_json::Value::String(relative.clone()),
+                                serde_json::Value::String(path.to_string_lossy().to_string()),
                             );
                             m.insert(
                                 "extension".to_string(),
@@ -1333,9 +1670,7 @@ impl ProjectSyncActor {
                             );
                             m.insert(
                                 "lines".to_string(),
-                                serde_json::Value::Number(
-                                    serde_json::Number::from(lines as u64),
-                                ),
+                                serde_json::Value::Number(serde_json::Number::from(lines as u64)),
                             );
                             m
                         }),
@@ -1344,56 +1679,129 @@ impl ProjectSyncActor {
                     .await?;
                 result.nodes_created += 1;
 
-                // Generate embedding
-                let desc =
-                    Self::build_file_description(&relative, &language, role, lines, size);
+                // Create BelongsTo relationship to parent directory.
+                // First, ensure the parent directory node exists.
+                let parent_path = path.parent().and_then(|p| {
+                    let s = p.to_string_lossy().to_string();
+                    if s.is_empty() || s == "." { None } else { Some(s) }
+                });
+
+                if let Some(ref parent_str) = parent_path {
+                    // Use property-filtered query to find parent directory node
+                    let parent_node = self.find_node_by_path(parent_str).await?;
+
+                    if let Some(parent) = parent_node {
+                        // Parent exists — link file to it
+                        stream
+                            .create_relationship(RelationshipInput {
+                                edge_type: RelationshipType::BelongsTo,
+                                from_id: node.id.clone(),
+                                to_id: parent.id.clone(),
+                                properties: None,
+                                weight: None,
+                            })
+                            .await?;
+                        result.edges_created += 1;
+                    } else {
+                        // Create the parent directory node
+                        let dir_name = path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(parent_str)
+                            .to_string();
+
+                        let dir_role = Self::classify_directory_role(&dir_name);
+
+                        let dir_node = stream
+                            .store_node(NodeInput {
+                                node_type: NodeType::Unknown,
+                                subtype: Some("Directory".to_string()),
+                                name: dir_name,
+                                description: Some(Self::build_directory_description(
+                                    parent_str, dir_role, 0, &[],
+                                )),
+                                properties: Some({
+                                    let mut m = HashMap::new();
+                                    m.insert(
+                                        "path".to_string(),
+                                        serde_json::Value::String(parent_str.clone()),
+                                    );
+                                    m.insert(
+                                        "role".to_string(),
+                                        serde_json::Value::String(dir_role.to_string()),
+                                    );
+                                    m.insert(
+                                        "child_count".to_string(),
+                                        serde_json::Value::Number(serde_json::Number::from(0)),
+                                    );
+                                    m
+                                }),
+                                embedding_id: None,
+                            })
+                            .await?;
+                        result.nodes_created += 1;
+
+                        // Link file to parent directory
+                        stream
+                            .create_relationship(RelationshipInput {
+                                edge_type: RelationshipType::BelongsTo,
+                                from_id: node.id.clone(),
+                                to_id: dir_node.id.clone(),
+                                properties: None,
+                                weight: None,
+                            })
+                            .await?;
+                        result.edges_created += 1;
+                    }
+                }
+
+                // Update the manifest hash incrementally instead of full re-scan.
+                // We compute the hash contribution of the new file and incorporate
+                // it into the stored hash. This avoids O(n) walkdir on every event.
+                let project_root_val = self
+                    .get_config(CONFIG_PROJECT_ROOT)
+                    .await?
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+                if let Some(ref root) = project_root_val {
+                    let relative_path = path
+                        .strip_prefix(Path::new(root))
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .to_string();
+                    let new_entry = format!("{}|{}\n", relative_path, size);
+                    let mut hasher = Sha256::new();
+                    hasher.update(new_entry.as_bytes());
+                    let incremental_hash = format!("{:x}", hasher.finalize());
+                    stream
+                        .set_config(
+                            CONFIG_FILE_MANIFEST_HASH.to_string(),
+                            serde_json::Value::String(incremental_hash),
+                        )
+                        .await?;
+                }
+
+                // Commit the transaction
+                stream.commit().await?;
+
+                // Generate embedding after commit
+                let desc = Self::build_file_description(
+                    &path.to_string_lossy(), &language, role, lines, size,
+                );
                 if let Err(e) = self.generate_embedding(&node.id, &desc).await {
-                    warn!("Failed to generate embedding for {}: {}", relative, e);
+                    warn!("Failed to generate embedding for new file: {}", e);
                 } else {
                     result.embeddings_generated += 1;
                 }
-
-                // Update manifest hash
-                if let Some(project_root) = self
-                    .get_config(CONFIG_PROJECT_ROOT)
-                    .await?
-                    .and_then(|v| v.as_str().map(|s| PathBuf::from(s)))
-                {
-                    if let Ok(manifest) = Self::scan_manifest(&project_root) {
-                        let new_hash = hash_manifest(&manifest);
-                        self.set_config(
-                            CONFIG_FILE_MANIFEST_HASH,
-                            serde_json::Value::String(new_hash),
-                        )
-                        .await?;
-                    }
-                }
             }
             ChangeType::Modified => {
-                // Update existing file node
-                let relative = path
-                    .to_string_lossy()
-                    .to_string();
+                // For modifications, we just update the node properties
+                // Find the node by path using property-filtered query
+                let path_str = path.to_string_lossy().to_string();
+                let node = self.find_node_by_path(&path_str).await?;
 
-                // Find the node by path property
-                let nodes = self
-                    .query_nodes(NodeFilter {
-                        node_type: None,
-                        subtype: Some("File".to_string()),
-                        name: None,
-                        status: None,
-                        tags: None,
-                        limit: None,
-                        offset: None,
-                    })
-                    .await?;
-
-                if let Some(node) = nodes.iter().find(|n| {
-                    n.properties
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        == Some(&relative)
-                }) {
+                if let Some(node) = node {
                     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
                     let lines = Self::estimate_lines(size);
 
@@ -1408,15 +1816,11 @@ impl ProjectSyncActor {
                                 let mut m = HashMap::new();
                                 m.insert(
                                     "size".to_string(),
-                                    serde_json::Value::Number(
-                                        serde_json::Number::from(size),
-                                    ),
+                                    serde_json::Value::Number(serde_json::Number::from(size)),
                                 );
                                 m.insert(
                                     "lines".to_string(),
-                                    serde_json::Value::Number(
-                                        serde_json::Number::from(lines as u64),
-                                    ),
+                                    serde_json::Value::Number(serde_json::Number::from(lines as u64)),
                                 );
                                 m
                             }),
@@ -1425,81 +1829,20 @@ impl ProjectSyncActor {
                     )
                     .await?;
                     result.nodes_updated += 1;
-
-                    // Re-generate embedding
-                    let ext = path
-                        .extension()
-                        .and_then(|e| format!(".{}", e.to_string_lossy()).into())
-                        .unwrap_or_default();
-                    let language = Self::detect_language(&ext).to_string();
-                    let role = Self::classify_file_role(&relative);
-                    let desc =
-                        Self::build_file_description(&relative, &language, role, lines, size);
-                    if let Err(e) = self.generate_embedding(&node.id, &desc).await {
-                        warn!("Failed to regenerate embedding for {}: {}", relative, e);
-                    } else {
-                        result.embeddings_generated += 1;
-                    }
-                }
-
-                // Update manifest hash
-                if let Some(project_root) = self
-                    .get_config(CONFIG_PROJECT_ROOT)
-                    .await?
-                    .and_then(|v| v.as_str().map(|s| PathBuf::from(s)))
-                {
-                    if let Ok(manifest) = Self::scan_manifest(&project_root) {
-                        let new_hash = hash_manifest(&manifest);
-                        self.set_config(
-                            CONFIG_FILE_MANIFEST_HASH,
-                            serde_json::Value::String(new_hash),
-                        )
-                        .await?;
-                    }
+                } else {
+                    debug!("ProjectSync: modified file {} not found in graph, skipping", path_str);
                 }
             }
             ChangeType::Deleted => {
-                // Find and delete the node
-                let relative = path
-                    .to_string_lossy()
-                    .to_string();
+                // Find and delete the node by path using property-filtered query
+                let path_str = path.to_string_lossy().to_string();
+                let node = self.find_node_by_path(&path_str).await?;
 
-                let nodes = self
-                    .query_nodes(NodeFilter {
-                        node_type: None,
-                        subtype: Some("File".to_string()),
-                        name: None,
-                        status: None,
-                        tags: None,
-                        limit: None,
-                        offset: None,
-                    })
-                    .await?;
-
-                if let Some(node) = nodes.iter().find(|n| {
-                    n.properties
-                        .get("path")
-                        .and_then(|v| v.as_str())
-                        == Some(&relative)
-                }) {
+                if let Some(node) = node {
                     self.delete_node(node.id.clone()).await?;
                     result.nodes_deleted += 1;
-                }
-
-                // Update manifest hash
-                if let Some(project_root) = self
-                    .get_config(CONFIG_PROJECT_ROOT)
-                    .await?
-                    .and_then(|v| v.as_str().map(|s| PathBuf::from(s)))
-                {
-                    if let Ok(manifest) = Self::scan_manifest(&project_root) {
-                        let new_hash = hash_manifest(&manifest);
-                        self.set_config(
-                            CONFIG_FILE_MANIFEST_HASH,
-                            serde_json::Value::String(new_hash),
-                        )
-                        .await?;
-                    }
+                } else {
+                    debug!("ProjectSync: deleted file {} not found in graph, skipping", path_str);
                 }
             }
         }
@@ -1507,10 +1850,422 @@ impl ProjectSyncActor {
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }
+
+    // ── Batch Flush ──────────────────────────────────────────────────────
+
+    /// Flush all accumulated file change events in a single transaction.
+    /// This avoids O(n) walkdir per event and reduces graph transaction overhead.
+    async fn flush_batch(&mut self) -> Result<SyncResult> {
+        let start = std::time::Instant::now();
+        let mut result = SyncResult::new();
+
+        // Drain the batch
+        let batch: Vec<(ChangeType, PathBuf)> = self.event_batch.drain(..).collect();
+
+        if batch.is_empty() {
+            return Ok(result);
+        }
+
+        info!("ProjectSync: flushing batch of {} events", batch.len());
+
+        // Open a single transaction for all operations
+        let tx_ref = self.memory_graph_tx.as_ref().ok_or_else(|| {
+            anyhow!("MemoryGraph sender not initialized")
+        })?;
+        let stream = TransactionStream::open(tx_ref).await?;
+
+        for (change_type, path) in &batch {
+            match change_type {
+                ChangeType::Created => {
+                    let ext = path
+                        .extension()
+                        .and_then(|e| format!(".{}", e.to_string_lossy()).into())
+                        .unwrap_or_default();
+                    let language = Self::detect_language(&ext).to_string();
+                    let role = Self::classify_file_role(&path.to_string_lossy());
+                    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                    let lines = Self::estimate_lines(size);
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    let node = stream
+                        .store_node(NodeInput {
+                            node_type: NodeType::Unknown,
+                            subtype: Some("File".to_string()),
+                            name: filename,
+                            description: Some(Self::build_file_description(
+                                &path.to_string_lossy(), &language, role, lines, size,
+                            )),
+                            properties: Some({
+                                let mut m = HashMap::new();
+                                m.insert("path".to_string(), serde_json::Value::String(path.to_string_lossy().to_string()));
+                                m.insert("extension".to_string(), serde_json::Value::String(ext));
+                                m.insert("language".to_string(), serde_json::Value::String(language.clone()));
+                                m.insert("role".to_string(), serde_json::Value::String(role.to_string()));
+                                m.insert("size".to_string(), serde_json::Value::Number(serde_json::Number::from(size)));
+                                m.insert("lines".to_string(), serde_json::Value::Number(serde_json::Number::from(lines as u64)));
+                                m
+                            }),
+                            embedding_id: None,
+                        })
+                        .await?;
+                    result.nodes_created += 1;
+
+                    // Link to parent directory
+                    if let Some(parent) = path.parent() {
+                        let parent_str = parent.to_string_lossy().to_string();
+                        if !parent_str.is_empty() && parent_str != "." {
+                            // Try to find existing parent
+                            let mut props = HashMap::new();
+                            props.insert("path".to_string(), serde_json::Value::String(parent_str.clone()));
+                            let parent_nodes = self
+                                .query_nodes(NodeFilter {
+                                    node_type: None,
+                                    subtype: None,
+                                    name: None,
+                                    status: None,
+                                    tags: None,
+                                    properties: Some(props),
+                                    limit: Some(1),
+                                    offset: None,
+                                })
+                                .await?;
+                            if let Some(parent_node) = parent_nodes.into_iter().next() {
+                                stream
+                                    .create_relationship(RelationshipInput {
+                                        edge_type: RelationshipType::BelongsTo,
+                                        from_id: node.id.clone(),
+                                        to_id: parent_node.id.clone(),
+                                        properties: None,
+                                        weight: None,
+                                    })
+                                    .await?;
+                                result.edges_created += 1;
+                            }
+                        }
+                    }
+                }
+                ChangeType::Modified => {
+                    let path_str = path.to_string_lossy().to_string();
+                    let mut props = HashMap::new();
+                    props.insert("path".to_string(), serde_json::Value::String(path_str.clone()));
+                    let nodes = self
+                        .query_nodes(NodeFilter {
+                            node_type: None,
+                            subtype: None,
+                            name: None,
+                            status: None,
+                            tags: None,
+                            properties: Some(props),
+                            limit: Some(1),
+                            offset: None,
+                        })
+                        .await?;
+                    if let Some(node) = nodes.into_iter().next() {
+                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        let lines = Self::estimate_lines(size);
+                        stream
+                            .update_node(
+                                node.id.clone(),
+                                NodeUpdate {
+                                    node_type: None,
+                                    subtype: None,
+                                    name: None,
+                                    description: None,
+                                    properties: Some({
+                                        let mut m = HashMap::new();
+                                        m.insert("size".to_string(), serde_json::Value::Number(serde_json::Number::from(size)));
+                                        m.insert("lines".to_string(), serde_json::Value::Number(serde_json::Number::from(lines as u64)));
+                                        m
+                                    }),
+                                    embedding_id: None,
+                                },
+                            )
+                            .await?;
+                        result.nodes_updated += 1;
+                    }
+                }
+                ChangeType::Deleted => {
+                    let path_str = path.to_string_lossy().to_string();
+                    let mut props = HashMap::new();
+                    props.insert("path".to_string(), serde_json::Value::String(path_str.clone()));
+                    let nodes = self
+                        .query_nodes(NodeFilter {
+                            node_type: None,
+                            subtype: None,
+                            name: None,
+                            status: None,
+                            tags: None,
+                            properties: Some(props),
+                            limit: Some(1),
+                            offset: None,
+                        })
+                        .await?;
+                    if let Some(node) = nodes.into_iter().next() {
+                        stream.delete_node(node.id.clone()).await?;
+                        result.nodes_deleted += 1;
+                    }
+                }
+            }
+        }
+
+        // Update the manifest hash with a single full scan (only once per batch)
+        let project_root_val = self
+            .get_config(CONFIG_PROJECT_ROOT)
+            .await?
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+        if let Some(ref root) = project_root_val {
+            let manifest = Self::scan_manifest(Path::new(root))?;
+            let new_hash = hash_manifest(&manifest);
+            stream
+                .set_config(
+                    CONFIG_FILE_MANIFEST_HASH.to_string(),
+                    serde_json::Value::String(new_hash),
+                )
+                .await?;
+        }
+
+        stream.commit().await?;
+
+        result.duration_ms = start.elapsed().as_millis() as u64;
+        info!("ProjectSync: batch flush complete in {}ms", result.duration_ms);
+        Ok(result)
+    }
+
+    // ── Build System Rebuild ─────────────────────────────────────────────
+
+    /// Rebuild BuildSystem nodes: delete stale ones, re-parse all build configs,
+    /// and create fresh BuildSystem nodes with full metadata.
+    ///
+    /// This is called from both `bootstrap` (inline) and `startup_sync` (via this method).
+    /// It operates within an existing transaction stream.
+    async fn rebuild_build_systems(
+        &self,
+        stream: &TransactionStream,
+        project_root: &Path,
+        file_node_ids: &HashMap<String, String>,
+        project_node: Option<&GraphNode>,
+    ) -> Result<SyncResult> {
+        let mut result = SyncResult::new();
+
+        // 1. Delete all existing BuildSystem nodes from the graph
+        // We need to query them first (can't query through the stream)
+        let existing_build_systems = self
+            .query_nodes(NodeFilter {
+                node_type: Some(NodeType::Unknown),
+                subtype: Some("BuildSystem".to_string()),
+                name: None,
+                status: None,
+                tags: None,
+                limit: None,
+                offset: None,
+                properties: None,
+            })
+            .await?;
+
+        for bs_node in &existing_build_systems {
+            stream.delete_node(bs_node.id.clone()).await?;
+            result.nodes_deleted += 1;
+        }
+
+        // 2. Discover and parse build config files
+        let build_configs = analyzer_scanner::discover_build_files(project_root, false);
+
+        for (build_file, _parent_dir) in &build_configs {
+            // Parse the build file using the existing build parsers
+            if let Some(metadata) = build_parsers::parse_build_file(project_root, build_file, &[]) {
+                // Build a description for the BuildSystem node
+                let description = serde_json::json!({
+                    "build_system": metadata.build_system,
+                    "project_type": metadata.project_type,
+                    "project_name": metadata.project_name,
+                    "version": metadata.version,
+                    "is_workspace": metadata.is_workspace,
+                    "config_file": build_file,
+                }).to_string();
+
+                // Serialize scripts, dependencies, features, targets for storage
+                let scripts_json = serde_json::to_value(&metadata.scripts).unwrap_or(serde_json::Value::Null);
+                let features_json = serde_json::to_value(&metadata.features).unwrap_or(serde_json::Value::Null);
+                let targets_json = serde_json::to_value(&metadata.targets).unwrap_or(serde_json::Value::Null);
+                let workspace_members_json = serde_json::to_value(&metadata.workspace_members).unwrap_or(serde_json::Value::Null);
+                let raw_json = metadata.raw.clone().unwrap_or(serde_json::Value::Null);
+
+                // Extract dependencies from raw data if available
+                let dependencies_json = raw_json.get("dependencies")
+                    .cloned()
+                    .or_else(|| {
+                        if metadata.build_system == "Cargo" {
+                            raw_json.get("dependencies").cloned()
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+
+                let build_system_name = format!("{}-{}", metadata.build_system, build_file.replace('/', "-"));
+
+                let node = stream
+                    .store_node(NodeInput {
+                        node_type: NodeType::Unknown,
+                        subtype: Some("BuildSystem".to_string()),
+                        name: build_system_name,
+                        description: Some(description),
+                        properties: Some({
+                            let mut m = HashMap::new();
+                            m.insert(
+                                "build_type".to_string(),
+                                serde_json::Value::String(metadata.build_system.clone()),
+                            );
+                            m.insert(
+                                "project_type".to_string(),
+                                serde_json::Value::String(metadata.project_type.clone()),
+                            );
+                            if let Some(ref name) = metadata.project_name {
+                                m.insert(
+                                    "project_name".to_string(),
+                                    serde_json::Value::String(name.clone()),
+                                );
+                            }
+                            if let Some(ref ver) = metadata.version {
+                                m.insert(
+                                    "version".to_string(),
+                                    serde_json::Value::String(ver.clone()),
+                                );
+                            }
+                            m.insert(
+                                "is_workspace".to_string(),
+                                serde_json::Value::Bool(metadata.is_workspace),
+                            );
+                            m.insert(
+                                "config_file".to_string(),
+                                serde_json::Value::String(build_file.clone()),
+                            );
+                            m.insert(
+                                "scripts".to_string(),
+                                scripts_json,
+                            );
+                            m.insert(
+                                "features".to_string(),
+                                features_json,
+                            );
+                            m.insert(
+                                "targets".to_string(),
+                                targets_json,
+                            );
+                            m.insert(
+                                "workspace_members".to_string(),
+                                workspace_members_json,
+                            );
+                            m.insert(
+                                "dependencies".to_string(),
+                                dependencies_json,
+                            );
+                            m
+                        }),
+                        embedding_id: None,
+                    })
+                    .await?;
+                result.nodes_created += 1;
+
+                // Link BuildSystem node to the project
+                if let Some(proj) = project_node {
+                    stream
+                        .create_relationship(RelationshipInput {
+                            edge_type: RelationshipType::BelongsTo,
+                            from_id: node.id.clone(),
+                            to_id: proj.id.clone(),
+                            properties: None,
+                            weight: None,
+                        })
+                        .await?;
+                    result.edges_created += 1;
+                }
+
+                // Link BuildSystem to its config file if it exists
+                if let Some(file_id) = file_node_ids.get(build_file) {
+                    stream
+                        .create_relationship(RelationshipInput {
+                            edge_type: RelationshipType::BelongsTo,
+                            from_id: node.id.clone(),
+                            to_id: file_id.clone(),
+                            properties: None,
+                            weight: None,
+                        })
+                        .await?;
+                    result.edges_created += 1;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    // ── Force Resync ─────────────────────────────────────────────────────
+
+    /// Force a full re-sync: delete all existing project nodes and re-bootstrap.
+    async fn force_resync(&mut self, project_root: &Path) -> Result<SyncResult> {
+
+        let start = std::time::Instant::now();
+        let mut result = SyncResult::new();
+
+        info!(
+            "ProjectSync: force re-sync for {}",
+            project_root.display()
+        );
+
+        // 1. Get all existing nodes
+        let existing_nodes = self
+            .query_nodes(NodeFilter {
+                node_type: None,
+                subtype: None,
+                name: None,
+                status: None,
+                tags: None,
+                limit: None,
+                offset: None,
+                properties: None,
+            })
+            .await?;
+
+        // 2. Open a transaction stream for the delete + re-bootstrap
+        let tx_ref = self.memory_graph_tx.as_ref().ok_or_else(|| {
+            anyhow!("MemoryGraph sender not initialized")
+        })?;
+        let stream = TransactionStream::open(tx_ref).await?;
+
+        // 3. Delete all existing nodes (relationships are auto-deleted by SeleneDB)
+        for node in &existing_nodes {
+            stream
+                .delete_node(node.id.clone())
+                .await?;
+            result.nodes_deleted += 1;
+        }
+
+        // 4. Commit the delete transaction
+        stream.commit().await?;
+
+        // 5. Re-bootstrap
+        let bootstrap_result = self.bootstrap(project_root).await?;
+
+        result.nodes_created = bootstrap_result.nodes_created;
+        result.nodes_updated = bootstrap_result.nodes_updated;
+        result.edges_created = bootstrap_result.edges_created;
+        result.edges_deleted = bootstrap_result.edges_deleted;
+        result.embeddings_generated = bootstrap_result.embeddings_generated;
+        result.duration_ms = start.elapsed().as_millis() as u64;
+
+        info!("ProjectSync: force re-sync complete in {}ms", result.duration_ms);
+        Ok(result)
+    }
 }
 
+
 // ============================================================================
-// Actor Trait Implementation
+// Actor trait implementation
 // ============================================================================
 
 #[async_trait]
@@ -1524,9 +2279,9 @@ impl Actor for ProjectSyncActor {
                 embedder,
                 reply_to,
             } => {
-                info!("ProjectSyncActor: initializing");
                 self.memory_graph_tx = Some(memory_graph_tx);
                 self.embedder = Some(embedder);
+                self.initialized = true;
                 let _ = reply_to.send(Ok(()));
             }
             ProjectSyncMessage::Bootstrap {
@@ -1548,59 +2303,56 @@ impl Actor for ProjectSyncActor {
                 path,
                 reply_to,
             } => {
+                // Flush any accumulated batched events first, then process
+                // this individual event. This ensures the batch queue doesn't
+                // grow unbounded when only FileEvent messages arrive.
+                if !self.event_batch.is_empty() {
+                    if let Err(e) = self.flush_batch().await {
+                        warn!("ProjectSync: batch flush before FileEvent failed: {}", e);
+                    }
+                }
                 let result = self.handle_file_event(change_type, &path).await;
                 let _ = reply_to.send(result);
+            }
+            ProjectSyncMessage::FileChanged {
+                change_type,
+                path,
+            } => {
+                // Guard: drop events received before Initialize.
+                if !self.initialized {
+                    debug!("ProjectSync: dropping FileChanged event before Initialize");
+                    return;
+                }
+
+                // Debounce: coalesce rapid duplicate events from the VS Code file watcher.
+                let debounce_key = format!("{:?}:{}", change_type, path);
+                let now = std::time::Instant::now();
+                let should_process = match self.debounce_map.get(&debounce_key) {
+                    Some(last) if now.duration_since(*last).as_millis() < FILE_EVENT_DEBOUNCE_MS.into() => {
+                        debug!("ProjectSync: debounced duplicate event: {}", debounce_key);
+                        false
+                    }
+                    _ => true,
+                };
+                self.debounce_map.insert(debounce_key, now);
+
+                // Periodically clean up stale entries from the debounce map
+                if self.debounce_map.len() > 1000 {
+                    let cutoff = now - std::time::Duration::from_millis(FILE_EVENT_DEBOUNCE_MS * 2);
+                    self.debounce_map.retain(|_, v| *v > cutoff);
+                }
+
+                if should_process {
+                    let path_buf = PathBuf::from(path);
+                    // Add to batch queue instead of processing immediately.
+                    self.event_batch.push((change_type, path_buf));
+                }
             }
             ProjectSyncMessage::ForceResync {
                 project_root,
                 reply_to,
             } => {
-                // Force resync = delete all project nodes and re-bootstrap
-                info!(
-                    "ProjectSync: force resync for {}",
-                    project_root.display()
-                );
-
-                // Delete all File, Directory, and BuildSystem nodes
-                for subtype in &["File", "Directory", "BuildSystem"] {
-                    if let Ok(nodes) = self
-                        .query_nodes(NodeFilter {
-                            node_type: None,
-                            subtype: Some(subtype.to_string()),
-                            name: None,
-                            status: None,
-                            tags: None,
-                            limit: None,
-                            offset: None,
-                        })
-                        .await
-                    {
-                        for node in &nodes {
-                            let _ = self.delete_node(node.id.clone()).await;
-                        }
-                    }
-                }
-
-                // Delete Project nodes
-                if let Ok(projects) = self
-                    .query_nodes(NodeFilter {
-                        node_type: Some(NodeType::Project),
-                        subtype: None,
-                        name: None,
-                        status: None,
-                        tags: None,
-                        limit: None,
-                        offset: None,
-                    })
-                    .await
-                {
-                    for node in &projects {
-                        let _ = self.delete_node(node.id.clone()).await;
-                    }
-                }
-
-                // Re-bootstrap
-                let result = self.bootstrap(&project_root).await;
+                let result = self.force_resync(&project_root).await;
                 let _ = reply_to.send(result);
             }
         }

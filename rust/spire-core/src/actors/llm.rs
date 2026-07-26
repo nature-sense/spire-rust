@@ -74,7 +74,7 @@ impl Default for LlmConfig {
         Self {
             api_url: "https://api.deepseek.com/v1/chat/completions".to_string(),
             api_key: String::new(),
-            model: "deepseek-chat".to_string(),
+            model: "deepseek-v4-pro".to_string(),
             max_tokens: 4096,
             temperature: 0.7,
             strict_mode: false,
@@ -99,7 +99,15 @@ impl LlmActor {
 
     /// Send a completion request to the LLM API.
     async fn complete(&self, prompt: &str) -> Result<String, ActorError> {
-        tracing::info!("LLM sending prompt: {}", prompt);
+        // Guard: reject requests when no API key is configured
+        if self.config.api_key.is_empty() {
+            return Err(ActorError::Internal(
+                "LLM API key not configured. Please set your DeepSeek API key in settings.".to_string()
+            ));
+        }
+
+        tracing::info!("[LLM] Complete: model={}, prompt_len={}, max_tokens={}",
+            self.config.model, prompt.len(), self.config.max_tokens);
 
         let body = serde_json::json!({
             "model": self.config.model,
@@ -122,6 +130,7 @@ impl LlmActor {
             .map_err(|e| ActorError::Internal(format!("LLM request failed: {}", e)))?;
 
         let status = response.status();
+        tracing::info!("[LLM] Response status: {}", status);
         let json: Value = response
             .json()
             .await
@@ -140,8 +149,28 @@ impl LlmActor {
             .ok_or_else(|| ActorError::Internal("LLM response missing content".to_string()))?
             .to_string();
 
-        tracing::info!("LLM received response: {}", content);
+        // Guard: reject empty content responses (DeepSeek sometimes returns "")
+        if content.is_empty() {
+            tracing::error!("[LLM] Empty content response received");
+            return Err(ActorError::Internal(
+                "LLM returned empty response. This may indicate an API key issue or rate limiting.".to_string()
+            ));
+        }
+
+        tracing::info!("[LLM] Complete response: {} chars", content.len());
         Ok(content)
+    }
+
+    /// Sanitize a role string to one of the valid OpenAI/DeepSeek API roles.
+    /// Maps unknown roles (e.g. "error") to "user" to prevent API rejection.
+    fn sanitize_role(role: &str) -> &str {
+        match role {
+            "system" | "user" | "assistant" | "tool" | "latest_reminder" => role,
+            _ => {
+                tracing::warn!("LLM: sanitizing unknown role '{}' to 'user'", role);
+                "user"
+            }
+        }
     }
 
     /// Send a completion request with a full messages array (system + history + user).
@@ -149,19 +178,27 @@ impl LlmActor {
         &self,
         messages: &[crate::actors::chat::ChatMessageData],
     ) -> Result<String, ActorError> {
+        // Guard: reject requests when no API key is configured
+        if self.config.api_key.is_empty() {
+            return Err(ActorError::Internal(
+                "LLM API key not configured. Please set your DeepSeek API key in settings.".to_string()
+            ));
+        }
+
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| {
                 serde_json::json!({
-                    "role": m.role,
+                    "role": Self::sanitize_role(&m.role),
                     "content": m.content,
                 })
             })
             .collect();
 
-        tracing::info!("LLM sending {} messages", api_messages.len());
+        tracing::info!("[LLM] CompleteWithMessages: model={}, msgs={}, url={}",
+            self.config.model, api_messages.len(), self.config.api_url);
         if let Some(last) = messages.last() {
-            tracing::info!("LLM last message (role={}): {}", last.role, last.content);
+            tracing::info!("[LLM]   last message: role={}, content={}", last.role, &last.content.chars().take(200).collect::<String>());
         }
 
         let body = serde_json::json!({
@@ -171,8 +208,6 @@ impl LlmActor {
             "temperature": self.config.temperature,
             "stream": false,
         });
-
-        tracing::info!("LLM request body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
 
         let response = self
             .client
@@ -185,6 +220,7 @@ impl LlmActor {
             .map_err(|e| ActorError::Internal(format!("LLM request failed: {}", e)))?;
 
         let status = response.status();
+        tracing::info!("[LLM] Response status: {}", status);
         let json: Value = response
             .json()
             .await
@@ -203,7 +239,15 @@ impl LlmActor {
             .ok_or_else(|| ActorError::Internal("LLM response missing content".to_string()))?
             .to_string();
 
-        tracing::info!("LLM received response: {}", content);
+        // Guard: reject empty content responses (DeepSeek sometimes returns "")
+        if content.is_empty() {
+            tracing::error!("[LLM] Empty content response");
+            return Err(ActorError::Internal(
+                "LLM returned empty response. This may indicate an API key issue or rate limiting.".to_string()
+            ));
+        }
+
+        tracing::info!("[LLM] CompleteWithMessages response: {} chars", content.len());
         Ok(content)
     }
 
@@ -215,11 +259,18 @@ impl LlmActor {
         messages: &[crate::actors::chat::ChatMessageData],
         tools: &[ToolInfo],
     ) -> Result<String, ActorError> {
+        // Guard: reject requests when no API key is configured
+        if self.config.api_key.is_empty() {
+            return Err(ActorError::Internal(
+                "LLM API key not configured. Please set your DeepSeek API key in settings.".to_string()
+            ));
+        }
+
         let api_messages: Vec<serde_json::Value> = messages
             .iter()
             .map(|m| {
                 serde_json::json!({
-                    "role": m.role,
+                    "role": Self::sanitize_role(&m.role),
                     "content": m.content,
                 })
             })
@@ -231,15 +282,35 @@ impl LlmActor {
         // We replace invalid characters with underscores and maintain
         // a reverse map so we can translate tool_calls back to original names.
         let mut name_map: HashMap<String, String> = HashMap::new();
-        let api_tools: Vec<serde_json::Value> = tools
-            .iter()
-            .map(|t| {
-                let sanitized: String = t.name
-                    .chars()
-                    .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-                    .collect();
-                name_map.insert(sanitized.clone(), t.name.clone());
 
+        // Deduplicate tools by sanitized name — the API rejects duplicate names.
+        // This is a defensive measure in case the tool list from ToolRouter
+        // contains duplicates (e.g. from overlapping MCP server definitions).
+        let mut seen_names: HashMap<String, &ToolInfo> = HashMap::new();
+        for t in tools {
+            let sanitized: String = t.name
+                .chars()
+                .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                .collect();
+            if let Some(existing) = seen_names.get(&sanitized) {
+                tracing::warn!(
+                    "[LLM] duplicate tool '{}' -> '{}', keeping '{}', dropping '{}'",
+                    t.name, sanitized, existing.name, t.name,
+                );
+                continue;
+            }
+            seen_names.insert(sanitized.clone(), t);
+            name_map.insert(sanitized.clone(), t.name.clone());
+        }
+
+        let tool_count = seen_names.len();
+        tracing::info!("[LLM] Tool name sanitization: {} unique tools, map: {:?}",
+            tool_count,
+            name_map.iter().map(|(k, v)| format!("{}->{}", k, v)).collect::<Vec<_>>());
+
+        let api_tools: Vec<serde_json::Value> = seen_names
+            .into_iter()
+            .map(|(sanitized, t)| {
                 let mut tool_def = serde_json::json!({
                     "type": "function",
                     "function": {
@@ -264,22 +335,23 @@ impl LlmActor {
             .collect();
 
         tracing::info!(
-            "LLM sending {} messages with {} tool definitions (strict_mode={})",
-            api_messages.len(),
-            api_tools.len(),
-            self.config.strict_mode,
+            "[LLM] CompleteWithTools: model={}, msgs={}, tools={} (unique={}), strict_mode={}",
+            self.config.model, api_messages.len(), tools.len(), api_tools.len(), self.config.strict_mode,
         );
         if let Some(last) = messages.last() {
-            tracing::info!("LLM last message (role={}): {}", last.role, last.content);
+            tracing::info!("[LLM]   last message: role={}, content={}", last.role, &last.content.chars().take(200).collect::<String>());
         }
 
         // Determine the API URL — use beta endpoint when strict mode is enabled
         let api_url = if self.config.strict_mode {
             // Replace /v1/ with /beta/ in the URL path
-            self.config.api_url.replace("/v1/", "/beta/")
+            let beta_url = self.config.api_url.replace("/v1/", "/beta/");
+            tracing::info!("[LLM] Strict mode: using beta API endpoint {}", beta_url);
+            beta_url
         } else {
             self.config.api_url.clone()
         };
+        tracing::info!("[LLM] API URL selected: {}", api_url);
 
         let mut body = serde_json::json!({
             "model": self.config.model,
@@ -293,7 +365,7 @@ impl LlmActor {
             body["tools"] = serde_json::json!(api_tools);
         }
 
-        tracing::info!("LLM request body: {}", serde_json::to_string_pretty(&body).unwrap_or_default());
+        tracing::info!("[LLM] Request body size: {} bytes", serde_json::to_string(&body).unwrap_or_default().len());
 
         let response = self
             .client
@@ -327,15 +399,21 @@ impl LlmActor {
         // ── Step 1: Check for native JSON tool_calls ──
         if let Some(tool_calls) = json["choices"][0]["message"]["tool_calls"].as_array() {
             if !tool_calls.is_empty() {
+                tracing::info!("[LLM] STEP 1: Found {} native JSON tool_calls", tool_calls.len());
                 return self.build_tool_calls_response(&json, &name_map);
+            } else {
+                tracing::info!("[LLM] STEP 1: tool_calls array present but empty");
             }
+        } else {
+            tracing::info!("[LLM] STEP 1: No native tool_calls field in response");
         }
 
         // ── Step 2: Check for XML/Claude-format tool calls in content ──
         if let Some(content) = json["choices"][0]["message"]["content"].as_str() {
+            tracing::info!("[LLM] STEP 2: Checking for XML tool calls in content ({} chars)", content.len());
             if let Some(xml_tool_calls) = Self::parse_xml_tool_calls(content) {
                 tracing::info!(
-                    "LLM returned {} XML-format tool call(s) in content, converting to synthetic tool_calls",
+                    "[LLM] STEP 2: Found {} XML-format tool call(s), converting to synthetic tool_calls",
                     xml_tool_calls.len()
                 );
 
@@ -359,16 +437,27 @@ impl LlmActor {
                 let msg_with_tools = serde_json::to_string(&msg)
                     .map_err(|e| ActorError::Internal(format!("Failed to serialize synthetic tool_calls: {}", e)))?;
                 return Ok(msg_with_tools);
+            } else {
+                tracing::info!("[LLM] STEP 2: No XML tool calls found in content");
             }
         }
 
         // ── Step 3: Normal text response ──
+        tracing::info!("[LLM] STEP 3: Normal text response");
         let content = json["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| ActorError::Internal("LLM response missing content".to_string()))?
             .to_string();
 
-        tracing::info!("LLM received response: {}", content);
+        // Guard: reject empty content responses (DeepSeek sometimes returns "")
+        if content.is_empty() {
+            tracing::error!("[LLM] Empty content response");
+            return Err(ActorError::Internal(
+                "LLM returned empty response. This may indicate an API key issue or rate limiting.".to_string()
+            ));
+        }
+
+        tracing::info!("[LLM] Text response: {} chars", content.len());
         Ok(content)
     }
 
@@ -389,9 +478,13 @@ impl LlmActor {
                 }
             }
         }
+        let tool_count = msg["tool_calls"].as_array().map(|a| a.len()).unwrap_or(0);
+        let tool_names: Vec<String> = msg["tool_calls"].as_array().map(|a| {
+            a.iter().filter_map(|tc| tc["function"]["name"].as_str().map(|s| s.to_string())).collect()
+        }).unwrap_or_default();
+        tracing::info!("[LLM] build_tool_calls_response: {} tool calls: {:?}", tool_count, tool_names);
         let msg_with_tools = serde_json::to_string(&msg)
             .map_err(|e| ActorError::Internal(format!("Failed to serialize tool_calls response: {}", e)))?;
-        tracing::info!("LLM returned {} tool call(s)", msg["tool_calls"].as_array().map(|a| a.len()).unwrap_or(0));
         Ok(msg_with_tools)
     }
 
@@ -412,7 +505,7 @@ impl LlmActor {
     fn parse_xml_tool_calls(content: &str) -> Option<Vec<Value>> {
         // The full-width vertical line character (U+FF5C) used by DeepSeek
         // We also accept standard ASCII variants for robustness.
-        let tag_prefix = "｜DSML｜";
+        let _tag_prefix = "｜DSML｜";
         let tag_prefix_alt = "function_calls";
 
         // Check if the content contains function_calls markup

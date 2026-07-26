@@ -1,0 +1,252 @@
+{
+  "step_definitions": [
+    {
+      "name": "read_error_context",
+      "description": "Read the source file lines around the error location",
+      "concrete_tool": "workspace/readFile",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "path": "$error.file",
+        "startLine": "$error.line - 5",
+        "endLine": "$error.line + 5"
+      },
+      "depends_on": [],
+      "output_key": "file_context",
+      "category": "read"
+    },
+    {
+      "name": "read_warning_context",
+      "description": "Read the source file lines around the warning location",
+      "concrete_tool": "workspace/readFile",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "path": "$error.file",
+        "startLine": "$error.line - 5",
+        "endLine": "$error.line + 5"
+      },
+      "depends_on": [],
+      "output_key": "warning_context",
+      "category": "read"
+    },
+    {
+      "name": "analyze_type_mismatch",
+      "description": "Analyze a type mismatch error and determine the correct types",
+      "concrete_tool": "llm/analyze",
+      "provider": "llm",
+      "arg_template": {
+        "system": "You are a compiler error analyst. Given a type error and surrounding code, determine the exact fix.",
+        "user": "Error: $error.error_text\n\nFile ($error.file:$error.line):\n$step.read_error_context.file_context",
+        "output_schema": {
+          "error_summary": "string",
+          "root_cause": "string",
+          "suggested_fix": "string"
+        }
+      },
+      "depends_on": ["read_error_context"],
+      "output_key": "analysis",
+      "category": "analyze"
+    },
+    {
+      "name": "analyze_borrow_pattern",
+      "description": "Analyze a Rust borrow checker violation and suggest lifetime adjustments",
+      "concrete_tool": "llm/analyze",
+      "provider": "llm",
+      "arg_template": {
+        "system": "You are a Rust borrow checker expert. Analyze the borrowing pattern and suggest a fix.",
+        "user": "Error: $error.error_text\n\nFile ($error.file:$error.line):\n$step.read_error_context.file_context",
+        "output_schema": {
+          "error_summary": "string",
+          "lifetime_analysis": "string",
+          "suggested_fix": "string"
+        }
+      },
+      "depends_on": ["read_error_context"],
+      "output_key": "analysis",
+      "category": "analyze"
+    },
+    {
+      "name": "identify_missing_symbol",
+      "description": "Identify what symbol or module is missing from an import or reference error",
+      "concrete_tool": "llm/analyze",
+      "provider": "llm",
+      "arg_template": {
+        "system": "You are a code analyzer. Given an import error, identify exactly what symbol or module is missing.",
+        "user": "Error: $error.error_text\n\nFile: $error.file"
+      },
+      "depends_on": [],
+      "output_key": "missing_symbol",
+      "category": "analyze"
+    },
+    {
+      "name": "find_correct_module",
+      "description": "Search the codebase to find the correct import path or module location",
+      "concrete_tool": "workspace/searchFiles",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "query": "$step.identify_missing_symbol.missing_symbol",
+        "maxResults": 10
+      },
+      "depends_on": ["identify_missing_symbol"],
+      "output_key": "search_results",
+      "category": "search"
+    },
+    {
+      "name": "add_import_statement",
+      "description": "Add a missing import statement to the source file",
+      "concrete_tool": "document/edit",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "path": "$error.file",
+        "importText": "import $step.identify_missing_symbol.missing_symbol from '$step.find_correct_module.search_results[0]'"
+      },
+      "depends_on": ["identical_missing_symbol", "find_correct_module"],
+      "output_key": "edit_result",
+      "category": "write"
+    },
+    {
+      "name": "apply_warning_fix",
+      "description": "Apply a code change to suppress or fix a compiler warning",
+      "concrete_tool": "document/edit",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "path": "$error.file",
+        "edits": "$step.analyze_error.suggested_fix"
+      },
+      "depends_on": ["read_warning_context"],
+      "output_key": "fix_result",
+      "category": "write"
+    },
+    {
+      "name": "analyze_dependency_tree",
+      "description": "Read dependency manifest files to understand version constraints",
+      "concrete_tool": "workspace/readFile",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "path": "$project_root/rust/Cargo.toml"
+      },
+      "depends_on": [],
+      "output_key": "manifest_content",
+      "category": "read"
+    },
+    {
+      "name": "find_compatible_versions",
+      "description": "Determine which dependency versions are mutually compatible",
+      "concrete_tool": "llm/analyze",
+      "provider": "llm",
+      "arg_template": {
+        "system": "You are a dependency resolution expert. Given a manifest and a conflict error, suggest compatible versions.",
+        "user": "Error: $error.error_text\n\nManifest:\n$step.analyze_dependency_tree.manifest_content",
+        "output_schema": {
+          "conflict": "string",
+          "solution": "string",
+          "updated_requirements": { "{package}": "version" }
+        }
+      },
+      "depends_on": ["analyze_dependency_tree"],
+      "output_key": "version_solution",
+      "category": "analyze"
+    },
+    {
+      "name": "update_manifests",
+      "description": "Update version requirements in dependency manifest files",
+      "concrete_tool": "document/edit",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "path": "$project_root/rust/Cargo.toml",
+        "edits": "$step.find_compatible_versions.version_solution.updated_requirements"
+      },
+      "depends_on": ["find_compatible_versions"],
+      "output_key": "edit_result",
+      "category": "write"
+    },
+    {
+      "name": "identify_missing_package",
+      "description": "Identify what package is missing from the error message",
+      "concrete_tool": "llm/analyze",
+      "provider": "llm",
+      "arg_template": {
+        "system": "You are a package manager expert. Given an error about a missing dependency, identify the package name.",
+        "user": "Error: $error.error_text\n\nBuild type: $error.build_type"
+      },
+      "depends_on": [],
+      "output_key": "package_name",
+      "category": "analyze"
+    },
+    {
+      "name": "run_install_command",
+      "description": "Execute the package manager install command for a missing dependency",
+      "concrete_tool": "install",
+      "provider": "project-meta",
+      "arg_template": {
+        "package": "$step.identify_missing_package.package_name",
+        "buildType": "$error.build_type"
+      },
+      "depends_on": ["identify_missing_package"],
+      "output_key": "install_result",
+      "category": "execute"
+    },
+    {
+      "name": "analyze_error",
+      "description": "Generic error analysis — read the error context and analyze the problem",
+      "concrete_tool": "llm/analyze",
+      "provider": "llm",
+      "arg_template": {
+        "system": "You are a code error analyst. Given a build error and surrounding context, identify the root cause and suggest a fix.",
+        "user": "Error type: $error.error_type\n\nError: $error.error_text\n\nFile ($error.file:$error.line):\n$step.read_error_context.file_context",
+        "output_schema": {
+          "error_summary": "string",
+          "root_cause": "string",
+          "suggested_fix": "string"
+        }
+      },
+      "depends_on": ["read_error_context"],
+      "output_key": "analysis",
+      "category": "analyze"
+    },
+    {
+      "name": "apply_fix",
+      "description": "Apply a code fix suggested by an analysis step",
+      "concrete_tool": "document/edit",
+      "provider": "vscode-extension",
+      "arg_template": {
+        "path": "$error.file",
+        "edits": "$step.analysis.suggested_fix"
+      },
+      "depends_on": ["analyze_type_mismatch", "analyze_borrow_pattern", "analyze_error"],
+      "output_key": "fix_result",
+      "category": "write"
+    }
+  ],
+  "tool_providers": [
+    {
+      "name": "vscode-extension",
+      "transport": "extension",
+      "prefix": "workspace/",
+      "description": "VS Code extension tools for file I/O, editing, search"
+    },
+    {
+      "name": "mcp-cargo",
+      "transport": "mcp",
+      "prefix": "mcp-cargo/",
+      "description": "Rust/Cargo MCP server (build, clean, analyze)"
+    },
+    {
+      "name": "mcp-node",
+      "transport": "mcp",
+      "prefix": "mcp-node/",
+      "description": "Node.js MCP server (build, install, analyze)"
+    },
+    {
+      "name": "llm",
+      "transport": "llm",
+      "prefix": "",
+      "description": "LLM reasoning engine for analysis steps"
+    },
+    {
+      "name": "project-meta",
+      "transport": "tool_router",
+      "prefix": "project/",
+      "description": "Project meta-tools (build, test, lint, install)"
+    }
+  ]
+}

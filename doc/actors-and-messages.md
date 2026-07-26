@@ -1,351 +1,278 @@
 # Actor System — Actors & Message Types
 
-> **Last updated:** 2026-07-09
+> **Last updated:** 2026-07-26
 
 This document catalogs every actor in the system, its message enum variants, and how they connect.
 
 ---
 
-## Framework (`spire-core/src/framework/`)
+## Architecture Overview
 
-### `Actor` trait (`actor.rs`)
+All 20+ actors communicate via `tokio::sync::mpsc` channels. The singleton `ActorSystem` (in `spire-core/src/framework/system.rs`) spawns each actor and returns an `mpsc::Sender<M>` handle.
 
-```rust
-#[async_trait]
-pub trait Actor: Send + 'static {
-    type Message: Send + 'static;
-    async fn handle(&mut self, msg: Self::Message);
-    fn spawn(mut self, mut rx: mpsc::Receiver<Self::Message>) -> JoinHandle<()>;
-}
+```
+ActorTrait: Send + 'static
+  └─ Message: Send + 'static
+  └─ handle(&mut self, msg: Self::Message)  ← called for each received message
+  └─ spawn(self) -> (Sender<M>, JoinHandle)  ← default loop on rx.recv()
 ```
 
-Every actor implements this trait. The default `spawn()` loops on `rx.recv()` and calls `handle()` for each message.
-
-### Core message types (`messages.rs`)
-
-| Type | Fields | Purpose |
-|------|--------|---------|
-| `ListToolsMessage` | `response_tx: Responder<Vec<ToolInfo>>` | Request to list all registered tools |
-| `ToolMessage` | `tool: String, args: Value, response_tx: Responder<Value>` | Generic tool invocation (used by tool actors) |
-| `ToolInfo` | `name, description, input_schema` | Metadata describing a registered tool |
-| `ActorError` | `ToolNotFound, Io, Serialization, ChannelClosed, Internal` | Typed errors for the actor system |
-
-### `ActorSystem` (`system.rs`)
-
-Thread-safe registry using `DashMap<String, Box<dyn Any>>` mapping actor names to `mpsc::Sender<M>`.
-
-```rust
-impl ActorSystem {
-    pub fn new() -> Self;
-    pub fn spawn<A: Actor>(&self, name: &str, actor: A) -> mpsc::Sender<A::Message>;
-    pub fn get<M: Send + 'static>(&self, name: &str) -> Option<mpsc::Sender<M>>;
-}
-```
+Messages use `tokio::sync::oneshot::Sender<R>` for reply channels. The `anyhow::Result<R>` pattern is standard — errors propagate up via `?`.
 
 ---
 
-## Core Actors (`spire-core/src/actors/`)
+## Actor Catalog
 
-### 1. CoordinatorActor (`coordinator.rs`)
+### 1. CoordinatorActor (`actors/coordinator.rs`)
 
-**Purpose:** Main workflow orchestrator. Receives user requests and delegates to other actors.
+**Purpose:** Main workflow orchestrator. Receives user requests, routes to intent router or LLM.
 
-**State:** Holds `mpsc::Sender` for chat, tools, mcp_client, llm, progress, and system channels.
-
-```
-CoordinatorMessage:
-  ├── HandleRequest {
-  │     method: String,
-  │     params: Value,
-  │     response_tx: oneshot::Sender<Value>
-  │   }
-  └── Shutdown
+```rust
+pub enum CoordinatorMessage {
+    HandleRequest { method: String, params: Value, response_tx: oneshot::Sender<Value> },
+    Shutdown,
+}
 ```
 
-**Connections:**
-- Forwards tool calls to `ToolsActor`
-- Forwards chat messages to `ChatActor`
-- Forwards MCP operations to `McpClientActor`
-- Forwards LLM requests to `LlmActor`
-- Forwards progress updates to `ProgressActor`
-- Forwards system operations to `SystemActor`
+**Connections:** Holds `mpsc::Sender` for all sub-actors (chat, tools, mcp_client, llm, progress, system, memory_graph, project_query, intent_router, prompt_handler, build_orchestrator, tool_router, plan_orchestrator, transport).
 
 ---
 
-### 2. ChatActor (`chat.rs`)
+### 2. IntentRouterActor (`actors/intent_router.rs`)
+
+**Purpose:** Matches user queries to registered intents using config-driven pattern matching.
+
+```rust
+pub enum RouteResult {
+    Build { intent_name, confidence, parameters },
+    Plan { intent_name, confidence, parameters },
+    StateBlocked { intent_name, confidence, missing_states },
+    NeedsApproval { intent_name, confidence },
+    Chat,
+}
+```
+
+**Key method:** `route_query(query, states) -> RouteResult` — loads intents from graph, matches against patterns.
+
+---
+
+### 3. ChatActor (`actors/chat.rs`)
 
 **Purpose:** Manages chat dialogs and message history.
 
-**State:** `HashMap<String, Dialog>` — dialog ID → dialog state.
-
-```
-ChatMessage:
-  ├── GetActive {
-  │     reply_to: oneshot::Sender<Option<Dialog>>
-  │   }
-  ├── Create {
-  │     title: Option<String>,
-  │     reply_to: oneshot::Sender<Dialog>
-  │   }
-  ├── SendMessage {
-  │     dialog_id: String,
-  │     content: String,
-  │     role: String,
-  │     reply_to: oneshot::Sender<Result<Message, ActorError>>
-  │   }
-  ├── GetHistory {
-  │     dialog_id: String,
-  │     reply_to: oneshot::Sender<Option<Vec<Message>>>
-  │   }
-  ├── ListDialogs {
-  │     reply_to: oneshot::Sender<Vec<DialogSummary>>
-  │   }
-  └── DeleteDialog {
-        dialog_id: String,
-        reply_to: oneshot::Sender<bool>
-      }
-```
-
----
-
-### 3. ToolsActor (`tools.rs`)
-
-**Purpose:** Manages tool registration and execution. Wraps both embedded tools and VS Code tools.
-
-**State:** `Vec<Box<dyn Tool>>` — registered tool implementations.
-
-```
-ToolsMessage:
-  ├── ListTools {
-  │     reply_to: oneshot::Sender<Vec<ToolInfo>>
-  │   }
-  └── CallTool {
-        tool: String,
-        args: Value,
-        reply_to: oneshot::Sender<Result<Value, ActorError>>
-      }
-```
-
----
-
-### 4. McpClientActor (`mcp_client.rs`)
-
-**Purpose:** Wraps `McpClientManager` — manages connections to external MCP servers (e.g. filesystem, git, etc.).
-
-**State:** `McpClientManager`
-
-```
-McpClientMessage:
-  ├── LoadConfig {
-  │     reply_to: oneshot::Sender<Result<Option<PathBuf>, ActorError>>
-  │   }
-  ├── ConnectAll {
-  │     reply_to: oneshot::Sender<Result<(), ActorError>>
-  │   }
-  ├── Connect {
-  │     server_name: String,
-  │     reply_to: oneshot::Sender<Result<(), ActorError>>
-  │   }
-  ├── DisconnectAll {
-  │     reply_to: oneshot::Sender<Result<(), ActorError>>
-  │   }
-  ├── Disconnect {
-  │     server_name: String,
-  │     reply_to: oneshot::Sender<Result<(), ActorError>>
-  │   }
-  ├── GetTools {
-  │     server_name: String,
-  │     reply_to: oneshot::Sender<Option<Vec<Tool>>>
-  │   }
-  ├── ConnectedServers {
-  │     reply_to: oneshot::Sender<Vec<String>>
-  │   }
-  └── CallTool {
-        server_name: String,
-        tool_name: String,
-        arguments: Option<Map<String, Value>>,
-        reply_to: oneshot::Sender<Result<CallToolResult, ActorError>>
-      }
-```
-
----
-
-### 5. LlmActor (`llm.rs`)
-
-**Purpose:** LLM gateway. Currently a stub that echoes back the prompt.
-
-**State:** Stateless.
-
-```
-LlmMessage:
-  ├── Complete {
-  │     prompt: String,
-  │     reply_to: oneshot::Sender<Result<String, ActorError>>
-  │   }
-  └── Stream {
-        prompt: String,
-        reply_to: oneshot::Sender<Result<Receiver<String>, ActorError>>
-      }
-```
-
----
-
-### 6. ProgressActor (`progress.rs`)
-
-**Purpose:** Broadcasts progress updates to subscribers via `tokio::sync::broadcast`.
-
-**State:** `broadcast::Sender<ProgressUpdate>` (buffer: 256)
-
-```
-ProgressMessage:
-  ├── Publish(ProgressUpdate {
-  │     task_id: String,
-  │     message: String,
-  │     percent: f64,
-  │     status: ProgressStatus  // Running | Completed | Failed
-  │   })
-  └── Subscribe {
-        reply_to: oneshot::Sender<Result<Receiver<ProgressUpdate>, ActorError>>
-      }
-```
-
----
-
-### 7. SystemActor (`system.rs`)
-
-**Purpose:** Handles system-level operations (shutdown, health checks).
-
-**State:** None.
-
-```
-SystemMessage:
-  ├── Shutdown {
-  │     reply_to: oneshot::Sender<Result<(), ActorError>>
-  │   }
-  └── Health {
-        reply_to: oneshot::Sender<Value>
-      }
-```
-
----
-
-### 8. VSCode Tools (`vscode_tools.rs`)
-
-**Purpose:** Defines the VS Code tool definitions that are registered with the tools actor. These are tool stubs that the VS Code extension implements on the other side of the JSON-RPC bridge.
-
-**State:** Static definitions.
-
 ```rust
-pub fn vscode_tool_definitions() -> Vec<ToolInfo>;
-```
-
----
-
-## Architecture Diagram
-
-```
-                          ┌──────────────┐
-                          │  JSON-RPC    │  stdin/stdout
-                          │  Transport   │  ←→ VS Code Extension
-                          └──────┬───────┘
-                                 │
-                    ┌────────────▼────────────┐
-                    │     CoordinatorActor     │  orchestrates workflows
-                    │  (request router)       │
-                    └──┬───┬───┬───┬───┬──────┘
-                       │   │   │   │   │
-              ┌────────┘   │   │   │   └──────────┐
-              ▼            ▼   │   ▼               ▼
-       ┌──────────┐  ┌────────┐│┌──────────┐ ┌──────────┐
-       │ Chat     │  │ Tools  │││   LLM    │ │ Progress │
-       │ Actor    │  │ Actor  │││  Actor   │ │  Actor   │
-       └──────────┘  └────────┘│└──────────┘ └──────────┘
-                               │
-                        ┌──────▼──────┐
-                        │ McpClient   │
-                        │   Actor     │──→ External MCP Servers
-                        │             │    (mcp-git, mcp-search,
-                        └─────────────┘     mcp-process, etc.)
-```
-
----
-
-## Spawning Pattern
-
-```rust
-let system = ActorSystem::new();
-
-// Spawn actors — each returns an mpsc::Sender for its message type
-let (chat_tx, _handle) = system.spawn(ChatActor::new());
-let (tools_tx, _handle) = system.spawn(ToolsActor::new());
-let (mcp_client_tx, _handle) = system.spawn(McpClientActor::new());
-let (llm_tx, _handle) = system.spawn(LlmActor::new(LlmConfig::default()));
-let (progress_tx, _handle) = system.spawn(ProgressActor::new());
-let (system_tx, _handle) = system.spawn(SystemActor::new());
-
-// Coordinator needs the senders of other actors
-let (coord_tx, _handle) = system.spawn(
-    CoordinatorActor::new(
-        chat_tx, tools_tx, mcp_client_tx,
-        llm_tx, progress_tx, system_tx,
-        transport_arc.clone(),
-    ),
-);
-```
-
----
-
-## MCP Configuration
-
-The `McpConfig` system provides configuration for external MCP server connections.
-
-### Config file location
-
-| Priority | Source | Path |
-|----------|--------|------|
-| 1 | `SPIRE_MCP_CONFIG` env var | Arbitrary path |
-| 2 | Default (project-local) | `{SPIRE_PROJECT_ROOT}/.spire/mcp-config.json` |
-| 3 | Fallback | `~/.spire/mcp-config.json` |
-
-### Config structure
-
-```json
-{
-  "external_servers": [
-    {
-      "name": "filesystem",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-      "env": null
-    }
-  ]
+pub enum ChatMessage {
+    Send { chat_id, content, role, reply_to: Sender<Result<ChatMessageResponse>> },
+    Append { chat_id, content, role, reply_to: Sender<Result<()>>, widget: Option<Value> },
+    GetHistory { chat_id, reply_to: Sender<Result<Vec<ChatMessageResponse>>> },
 }
 ```
 
-### Types
+---
 
-| Type | Fields | Purpose |
-|------|--------|---------|
-| `McpConfig` | `external_servers` | Top-level config |
-| `ExternalServerConfig` | `name, command, args, env` | External MCP server definition |
-| `ConfigError` | `Io`, `Parse` | Error types for config loading |
+### 4. LlmActor (`actors/llm.rs`)
 
-### Loading flow
+**Purpose:** LLM gateway — sends prompts to DeepSeek API (or mock in dev mode).
 
-1. `main.rs` calls `McpConfig::load()` at startup
-2. If no config file is found (project-local or fallback), no external servers are configured
-3. External server configs are stored for later connection by `McpClientActor`
+```rust
+pub enum LlmMessage {
+    Complete { prompt: String, reply_to: Sender<Result<String>> },
+    Stream { prompt: String, reply_to: Sender<Result<mpsc::Receiver<String>>> },
+}
+```
 
 ---
 
-## Error Handling
+### 5. MemoryGraphActor (`actors/memory_graph.rs`)
 
-All actor responses use `ActorError`:
+**Purpose:** Sole data store actor. Owns the GraphDb (SeleneDB) instance for nodes, edges, and vector embeddings.
 
-| Variant | Meaning |
-|---------|---------|
-| `ToolNotFound(String)` | Requested tool name is not registered |
-| `Io(io::Error)` | Filesystem or I/O operation failed |
-| `Serialization(serde_json::Error)` | JSON serialization/deserialization failed |
-| `ChannelClosed` | The oneshot receiver was dropped before sending |
-| `Internal(String)` | Any other internal error |
+```rust
+pub enum MemoryGraphMessage {
+    // Node operations
+    GetNode { id, reply_to },
+    StoreNode { node: NodeInput, reply_to },
+    UpdateNode { id, updates: NodeUpdate, reply_to },
+    DeleteNode { id, reply_to },
+    QueryNodes { filter: NodeFilter, reply_to },
+
+    // Relationship operations
+    CreateRelationship { rel: RelationshipInput, reply_to },
+    DeleteRelationship { id, reply_to },
+    QueryRelationships { filter, reply_to },
+    Traverse { start_id, options, reply_to },
+
+    // Config
+    GetConfig { key, reply_to },
+    SetConfig { key, value, reply_to },
+
+    // Transaction stream (for atomic batches)
+    OpenStream { reply_to },
+
+    // Project
+    GetProjectContext { reply_to },
+    Sync { reply_to },
+    Initialize { data_dir, reply_to },
+
+    // Search
+    SemanticSearch { query, threshold, reply_to },
+}
+```
+
+---
+
+### 6. ToolOrchestratorActor (`actors/tool_orchestrator.rs`)
+
+**Purpose:** Executes tools and tool chains with step context (template resolution for `$error.*`, `$step.*` variables).
+
+```rust
+pub enum ToolOrchestratorMessage {
+    ExecuteTool { tool_name, parameters, reply_to },
+    ExecuteToolChain { tools, parameters, reply_to },
+    ExecuteToolChainWithContext { tools, error: BuildError, project_root, reply_to },
+}
+```
+
+---
+
+### 7. ToolRouterActor (`actors/tool_providers/mod.rs`)
+
+**Purpose:** Routes tool calls by prefix:
+- `workspace/`, `document/`, `diagnostics/`, `git/`, `symbols/` → VS Code extension
+- `project/`, `build/`, `test/`, `lint/`, `install/` → internal actors
+- Everything else → MCP
+
+---
+
+### 8. BuildOrchestratorActor (`actors/build_orchestrator.rs`)
+
+**Purpose:** Manages the build-fix loop lifecycle.
+
+```rust
+pub enum BuildOrchestratorMessage {
+    StartBuild { parameters: BuildContext, reply_to },
+    ApplyFix { strategy_name, target_system, reply_to },
+    RollbackBuild { step, reply_to },
+}
+```
+
+Key data types: `BuildContext`, `SystemBuildResult`, `BuildResult`, `BuildError`, `FixPlan`, `AnnotatedError`, `ScoredFix`.
+
+---
+
+### 9. ErrorAnalyzerActor (`actors/error_analyzer.rs`)
+
+**Purpose:** Matches build errors to fix strategies via regex detection + graph lookup.
+
+```rust
+pub enum ErrorAnalyzerMessage {
+    AnalyzeErrors { system_results, build_run_id, reply_to },
+    ValidateFix { fix_name, context, reply_to },
+}
+```
+
+---
+
+### 10. PlanOrchestratorActor (`actors/plan_orchestrator.rs`) ★ NEW
+
+**Purpose:** Creates, stores, and executes multi-step plans with approve/reject/pause/retry/skip flow.
+
+```rust
+pub enum PlanOrchestratorMessage {
+    CreatePlan { goal, intent_name, parameters, reply_to },
+    ApprovePlan { plan_id, reply_to },
+    RejectPlan { plan_id, reason, reply_to },
+    GetPlanStatus { plan_id, reply_to },
+    PausePlan { plan_id, reply_to },
+    ResumePlan { plan_id, reply_to },
+    RetryStep { plan_id, step_order, reply_to },
+    SkipStep { plan_id, step_order, reply_to },
+}
+```
+
+Key data types: `PlanStatus` (Pending/Approved/Executing/Paused/Completed/Rejected/Failed/Skipped), `PlanStepData`, `PlanStatusResult`, `PlanStepEntry`.
+
+---
+
+### 11. ProjectBuildActor (`actors/project_build.rs`)
+
+**Purpose:** Per-system build execution via MCP tools. Supports multi-system parallel builds.
+
+### 12. ProjectTestActor (`actors/project_test.rs`)
+
+**Purpose:** Test execution via MCP tools.
+
+### 13. ProjectLintActor (`actors/project_lint.rs`)
+
+**Purpose:** Lint execution via MCP tools.
+
+### 14. ProjectInstallActor (`actors/project_install.rs`)
+
+**Purpose:** Package installation via MCP tools (e.g., `cargo add`, `npm install`).
+
+### 15. ProjectAnalyzerActor (`actors/project_analyzer.rs`)
+
+**Purpose:** Semantic project analysis for LLM context injection.
+
+### 16. ProjectQueryActor (`actors/project_query.rs`)
+
+**Purpose:** Structured project queries (files, symbols, dependencies) for LLM context.
+
+### 17. ProjectSyncActor (`actors/project_sync.rs`)
+
+**Purpose:** Three-phase project structure sync (scan, analyze, store).
+
+### 18. SystemPromptActor (`actors/system_prompt.rs`)
+
+**Purpose:** Caches system prompt prefix for DeepSeek prompt caching.
+
+### 19. McpClientActor (`actors/mcp_client.rs`)
+
+**Purpose:** Manages external MCP server connections (stdio or HTTP transport).
+
+### 20. ProgressActor (`actors/progress.rs`)
+
+**Purpose:** Broadcasts progress updates via `tokio::sync::broadcast`.
+
+```rust
+pub enum ProgressMessage {
+    Send { update: ProgressUpdate, reply_to },
+    Subscribe { reply_to: Sender<Receiver<ProgressUpdate>> },
+}
+```
+
+### 21. SystemActor (`actors/system.rs`)
+
+**Purpose:** System state machine driving the startup phase chain.
+
+---
+
+## Actor Wiring Diagram
+
+```
+main.rs spawn order:
+  ChatActor → ProgressActor → McpClientActor → LlmActor → SystemActor →
+  MemoryGraphActor → ProjectSyncActor → ProjectAnalyzerActor → ProjectQueryActor →
+  SystemPromptActor → IntentRouterActor → ErrorAnalyzerActor → TransportActor →
+  ProjectBuildActor → ProjectTestActor → ProjectLintActor → ProjectInstallActor →
+  ToolRouterActor → ToolsActor → PromptHandlerActor → ToolOrchestratorActor →
+  BuildOrchestratorActor → PlanOrchestratorActor →
+  CoordinatorActor (receives all sender handles)
+```
+
+## Reply Channel Pattern
+
+All actors use the same reply pattern:
+
+```rust
+let (tx, rx) = tokio::sync::oneshot::channel();
+actor_tx.send(SomeMessage { ..., reply_to: tx }).await?;
+let result = rx.await??;  // Outer Result: channel closed; Inner Result: operation
+```
+
+Error types vary by actor:
+- `MemoryGraphMessage` → `Result<String>` (SeleneDB error messages)
+- `LlmMessage` → `Result<String>` (LLM error messages)
+- `ProjectQueryMessage` → `Result<Vec<GraphNode>>` (empty if none)
+- `BuildOrchestratorMessage` → `Result<BuildStartResult>`
+- `PlanOrchestratorMessage` → `Result<PlanStatusResult>`

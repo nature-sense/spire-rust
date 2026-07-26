@@ -10,9 +10,11 @@
 use async_trait::async_trait;
 use rust_mcp_sdk::schema::{CallToolResult, Tool};
 use serde::Serialize;
+use std::time::Instant;
 
 use crate::actors::{Actor, ActorError};
-use crate::mcp::client::{McpClientManager, McpServerConfig};
+use crate::mcp::client::{BuildSystemInfo, McpClientManager, McpServerConfig};
+use super::progress::{ProgressMessage, ProgressUpdate, ProgressStatus};
 
 /// Structured detail about an MCP server for the UI.
 #[derive(Debug, Clone, Serialize)]
@@ -86,6 +88,15 @@ pub enum McpClientMessage {
         tools: Vec<Tool>,
         reply_to: tokio::sync::oneshot::Sender<Result<(), ActorError>>,
     },
+    /// Get build system info for a connected server.
+    GetBuildSystemInfo {
+        server_name: String,
+        reply_to: tokio::sync::oneshot::Sender<Option<BuildSystemInfo>>,
+    },
+    /// Get all connected servers that have build system info (build MCPs).
+    GetBuildServers {
+        reply_to: tokio::sync::oneshot::Sender<Vec<(String, BuildSystemInfo)>>,
+    },
 }
 
 /// Actor that wraps `McpClientManager` behind message-passing.
@@ -96,6 +107,8 @@ pub struct McpClientActor {
     manager: McpClientManager,
     /// Internal tools exposed under the pseudo "spire" server.
     internal_tools: Vec<Tool>,
+    /// Optional sender for publishing progress notifications on tool calls.
+    progress_tx: Option<tokio::sync::mpsc::Sender<ProgressMessage>>,
 }
 
 impl McpClientActor {
@@ -103,6 +116,18 @@ impl McpClientActor {
         Self {
             manager: McpClientManager::new(),
             internal_tools: Vec::new(),
+            progress_tx: None,
+        }
+    }
+
+    /// Create a new McpClientActor with a progress notification channel.
+    /// When set, tool calls will publish start/completion notifications
+    /// via the ProgressActor broadcast channel.
+    pub fn with_progress(progress_tx: tokio::sync::mpsc::Sender<ProgressMessage>) -> Self {
+        Self {
+            manager: McpClientManager::new(),
+            internal_tools: Vec::new(),
+            progress_tx: Some(progress_tx),
         }
     }
 }
@@ -209,16 +234,84 @@ impl Actor for McpClientActor {
                 arguments,
                 reply_to,
             } => {
+                let task_id = format!("mcp:{}:{}", server_name, tool_name);
+
+                // Publish "running" notification before the call
+                if let Some(ref tx) = self.progress_tx {
+                    let _ = tx
+                        .send(ProgressMessage::Publish {
+                            update: ProgressUpdate {
+                                task_id: task_id.clone(),
+                                message: format!("Calling {} on {}", tool_name, server_name),
+                                percent: 0.0,
+                                status: ProgressStatus::Running,
+                                metadata: Some(serde_json::json!({
+                                    "server": server_name,
+                                    "tool": tool_name,
+                                })),
+                            },
+                        })
+                        .await;
+                }
+
+                let start = Instant::now();
                 let result = self
                     .manager
                     .call_tool(&server_name, &tool_name, arguments)
                     .await
                     .map_err(|e| ActorError::Internal(format!("Tool call failed: {}", e)));
+                let elapsed = start.elapsed();
+
+                // Publish "completed" or "failed" notification after the call
+                if let Some(ref tx) = self.progress_tx {
+                    let (status, message) = match &result {
+                        Ok(_) => (
+                            ProgressStatus::Completed,
+                            format!("{} on {} completed in {:.1}s", tool_name, server_name, elapsed.as_secs_f64()),
+                        ),
+                        Err(e) => (
+                            ProgressStatus::Failed,
+                            format!("{} on {} failed after {:.1}s: {}", tool_name, server_name, elapsed.as_secs_f64(), e),
+                        ),
+                    };
+                    let _ = tx
+                        .send(ProgressMessage::Publish {
+                            update: ProgressUpdate {
+                                task_id: task_id.clone(),
+                                message,
+                                percent: 100.0,
+                                status,
+                                metadata: Some(serde_json::json!({
+                                    "server": server_name,
+                                    "tool": tool_name,
+                                    "elapsed_secs": elapsed.as_secs_f64(),
+                                })),
+                            },
+                        })
+                        .await;
+                }
+
                 let _ = reply_to.send(result);
             }
             McpClientMessage::SetInternalTools { tools, reply_to } => {
                 self.internal_tools = tools;
                 let _ = reply_to.send(Ok(()));
+            }
+            McpClientMessage::GetBuildSystemInfo {
+                server_name,
+                reply_to,
+            } => {
+                let info = self.manager.get_build_system_info(&server_name).cloned();
+                let _ = reply_to.send(info);
+            }
+            McpClientMessage::GetBuildServers { reply_to } => {
+                let servers: Vec<(String, BuildSystemInfo)> = self
+                    .manager
+                    .build_servers()
+                    .into_iter()
+                    .map(|(name, info)| (name.to_string(), info.clone()))
+                    .collect();
+                let _ = reply_to.send(servers);
             }
         }
     }
@@ -236,6 +329,13 @@ impl McpClientActor {
         // everything loaded from the database, even if connection failed).
         let configured: Vec<&str> = self.manager.configured_servers();
 
+        tracing::info!(
+            "build_server_details: {} configured servers, {} connections, {} internal tools",
+            configured.len(),
+            self.manager.connected_servers().len(),
+            self.internal_tools.len(),
+        );
+
         let mut details: Vec<McpServerDetail> = configured
             .into_iter()
             .map(|name| {
@@ -246,6 +346,13 @@ impl McpClientActor {
                     vec![]
                 };
                 let tool_count = tools.len();
+
+                tracing::info!(
+                    "build_server_details: server '{}' status={} tools={}",
+                    name,
+                    if is_online { "online" } else { "offline" },
+                    tool_count,
+                );
 
                 McpServerDetail {
                     name: name.to_string(),
@@ -261,6 +368,10 @@ impl McpClientActor {
 
         // Add the pseudo "spire" server with internal tools
         if !self.internal_tools.is_empty() {
+            tracing::info!(
+                "build_server_details: adding pseudo 'spire' server with {} internal tools",
+                self.internal_tools.len(),
+            );
             details.push(McpServerDetail {
                 name: "spire".to_string(),
                 description: "Built-in Spire tools (VS Code extension API)".to_string(),

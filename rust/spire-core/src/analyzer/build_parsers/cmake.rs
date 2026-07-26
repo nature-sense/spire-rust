@@ -128,15 +128,18 @@ pub fn parse_cmake(project_root: &Path) -> Option<BuildMetadata> {
     scripts.push(BuildScript {
         name: "configure".to_string(),
         command: "cmake -B build".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "configure"}})),
     });
     scripts.push(BuildScript {
         name: "build".to_string(),
         command: "cmake --build build".to_string(),
+        tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "build"}})),
     });
     if has_tests {
         scripts.push(BuildScript {
             name: "test".to_string(),
             command: "ctest --test-dir build".to_string(),
+            tool_call: Some(serde_json::json!({"tool": "project/build", "args": {"mode": "test"}})),
         });
     }
 
