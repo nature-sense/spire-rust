@@ -46,7 +46,7 @@ pub struct GraphEdge {
 }
 
 /// Helper to convert a string to DbString (using TryFrom).
-fn to_db_string(s: &str) -> DbString {
+pub fn to_db_string(s: &str) -> DbString {
     DbString::try_from(s).expect("valid DbString")
 }
 
@@ -416,6 +416,16 @@ impl GraphDb {
     ///
     /// This is useful for testing or resetting the database to a clean state.
     /// All data is permanently lost.
+    /// Execute a raw GQL write statement.
+    pub fn execute_gql_write(&self, _gql: &str) -> Result<()> {
+        Err(anyhow::anyhow!("execute_gql_write not implemented on this GraphDb wrapper"))
+    }
+
+    /// Execute a raw GQL query.
+    pub fn execute_gql_query(&self, _gql: &str) -> Result<Vec<serde_json::Value>> {
+        Err(anyhow::anyhow!("execute_gql_query not implemented on this GraphDb wrapper"))
+    }
+
     pub fn clear(&self) -> Result<()> {
         let mut txn = self.shared.begin_write();
         let mut mutator = txn.mutator();

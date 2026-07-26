@@ -66,6 +66,15 @@ pub struct BuildMetadata {
     pub project_type: String,
     /// Backward-compat: primary build system (e.g. "Cargo", "npm")
     pub build_system: String,
+    /// Backward-compat fields (expected by build parsers)
+    pub version: Option<String>,
+    pub is_workspace: bool,
+    pub scripts: Vec<BuildScript>,
+    pub features: Vec<String>,
+    pub targets: Vec<String>,
+    pub workspace_member_paths: Vec<String>,
+    pub dependencies: Vec<String>,
+    pub raw: Option<serde_json::Value>,
 }
 
 /// A single script entry from package.json
@@ -73,6 +82,7 @@ pub struct BuildMetadata {
 pub struct BuildScript {
     pub name: String,
     pub command: String,
+    pub tool_call: Option<serde_json::Value>,
 }
 
 /// Packaging information for the project — how to build and distribute
@@ -121,6 +131,10 @@ pub struct CargoInfo {
     pub keywords: Vec<String>,
     pub dependencies: Vec<CargoDependency>,
     pub features: std::collections::HashMap<String, Vec<String>>,
+    pub targets: Vec<CargoTarget>,
+    pub workspace_members: Vec<CargoWorkspaceMember>,
+    pub workspace_resolver: Option<String>,
+    pub publish: Option<bool>,
 }
 
 /// A single dependency from `cargo metadata`.
@@ -130,6 +144,8 @@ pub struct CargoDependency {
     pub version_req: String,
     pub optional: bool,
     pub features: Vec<String>,
+    pub path: Option<String>,
+    pub git: Option<String>,
 }
 
 /// Node.js-specific metadata from package.json analysis.
@@ -164,4 +180,41 @@ pub struct PackagingInfo {
     pub package_entry_point: Option<String>,
     /// Missing dependencies that would prevent packaging
     pub missing_dependencies: Vec<String>,
+}
+
+
+/// A workspace member entry (backward compat).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceMember {
+    pub name: String,
+    pub path: String,
+    pub version: Option<String>,
+}
+
+/// A build target (backward compat).  
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildTarget {
+    pub name: String,
+    pub kind: Vec<String>,
+    pub source_path: Option<String>,
+}
+
+/// A dependency entry (backward compat).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dependency {
+    pub name: String,
+    pub version: String,
+    pub version_req: Option<String>,
+    pub kind: Option<String>,
+    pub source: Option<String>,
+    pub source_url: Option<String>,
+    pub features: Option<Vec<String>>,
+}
+
+
+/// MCP server capability mapping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerCapability {
+    pub name: String,
+    pub capabilities: Vec<String>,
 }
