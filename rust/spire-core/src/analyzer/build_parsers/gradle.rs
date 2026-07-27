@@ -131,5 +131,7 @@ pub fn parse_gradle(project_root: &Path, build_file: &str) -> Option<BuildMetada
         targets: vec![],
         config_files: vec![build_file.to_string()],
         raw: None,
+    ..Default::default()
     })
 }
+

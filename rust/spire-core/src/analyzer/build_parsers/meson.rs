@@ -142,5 +142,7 @@ pub fn parse_meson_build(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["meson.build".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
+

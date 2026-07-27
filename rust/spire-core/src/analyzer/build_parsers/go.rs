@@ -86,5 +86,7 @@ pub fn parse_go_mod(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["go.mod".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
+

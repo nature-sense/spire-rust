@@ -119,6 +119,7 @@ pub fn parse_cargo(project_root: &Path) -> Option<BuildMetadata> {
             targets,
             config_files: vec!["Cargo.toml".to_string()],
             raw: Some(serde_json::to_value(&cargo_info).unwrap_or_default()),
+        ..Default::default()
         });
     }
 
@@ -172,5 +173,7 @@ pub fn parse_cargo(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["Cargo.toml".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
+

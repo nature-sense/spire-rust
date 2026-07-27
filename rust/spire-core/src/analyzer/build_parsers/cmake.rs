@@ -155,5 +155,7 @@ pub fn parse_cmake(project_root: &Path) -> Option<BuildMetadata> {
         targets,
         config_files: vec!["CMakeLists.txt".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
+

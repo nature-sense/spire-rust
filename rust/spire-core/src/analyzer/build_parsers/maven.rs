@@ -109,6 +109,7 @@ pub fn parse_pom(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["pom.xml".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
 
@@ -144,3 +145,4 @@ fn extract_xml_block(content: &str, tag: &str) -> Option<String> {
 
     None
 }
+

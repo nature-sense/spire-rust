@@ -150,6 +150,7 @@ pub fn parse_package_json(project_root: &Path) -> Option<BuildMetadata> {
         targets,
         config_files,
         raw: Some(json),
+    ..Default::default()
     })
 }
 
@@ -220,6 +221,7 @@ pub fn parse_pnpm_workspace(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["pnpm-workspace.yaml".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
 
@@ -320,3 +322,4 @@ fn simple_glob_match(pattern: &str, name: &str) -> bool {
     }
     true
 }
+

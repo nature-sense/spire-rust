@@ -107,5 +107,7 @@ pub fn parse_makefile(project_root: &Path) -> Option<BuildMetadata> {
         targets,
         config_files: vec!["Makefile".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
+

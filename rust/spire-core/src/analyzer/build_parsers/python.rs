@@ -125,6 +125,7 @@ fn parse_pyproject_toml(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["pyproject.toml".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
 
@@ -158,6 +159,7 @@ fn parse_setup_py(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["setup.py".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
 
@@ -201,5 +203,7 @@ fn parse_setup_cfg(project_root: &Path) -> Option<BuildMetadata> {
         targets: vec![],
         config_files: vec!["setup.cfg".to_string()],
         raw: None,
+    ..Default::default()
     })
 }
+

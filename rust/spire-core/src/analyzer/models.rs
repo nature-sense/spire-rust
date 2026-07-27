@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A single file or directory entry from scanning.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileInfo {
     pub path: String,
     pub relative_path: String,
@@ -12,7 +12,7 @@ pub struct FileInfo {
 }
 
 /// A directory in the hierarchical file tree.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DirectoryNode {
     pub name: String,
     pub path: String,
@@ -24,7 +24,7 @@ pub struct DirectoryNode {
 }
 
 /// A file in the hierarchical file tree.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FileNode {
     pub name: String,
     pub path: String,
@@ -36,7 +36,7 @@ pub struct FileNode {
 }
 
 /// The complete result of a project analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProjectFileTree {
     pub root: DirectoryNode,
     pub build: BuildMetadata,
@@ -48,7 +48,7 @@ pub struct ProjectFileTree {
 }
 
 /// Normalized metadata for all detected build systems in a project.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuildMetadata {
     /// Detected build system types
     pub build_types: Vec<String>,
@@ -77,8 +77,10 @@ pub struct BuildMetadata {
     pub raw: Option<serde_json::Value>,
 }
 
+#[automatically_derived]
+
 /// A single script entry from package.json
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuildScript {
     pub name: String,
     pub command: String,
@@ -88,7 +90,7 @@ pub struct BuildScript {
 /// Packaging information for the project — how to build and distribute
 /// the final artifact. Detected by analyzing package.json build configs,
 /// VSCode extension manifests, and binary staging scripts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PackagingInfo {
     /// Type of packager (e.g. "vsce", "npm", "docker", "python-wheels")
     pub packager_type: String,
@@ -105,7 +107,7 @@ pub struct PackagingInfo {
 }
 
 /// Language statistics from analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LanguageInfo {
     pub name: String,
     pub file_count: usize,
@@ -114,7 +116,7 @@ pub struct LanguageInfo {
 }
 
 /// Rust-specific metadata from `cargo metadata`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CargoInfo {
     pub name: String,
     pub version: String,
@@ -138,7 +140,7 @@ pub struct CargoInfo {
 }
 
 /// A single dependency from `cargo metadata`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CargoDependency {
     pub name: String,
     pub version_req: String,
@@ -149,7 +151,7 @@ pub struct CargoDependency {
 }
 
 /// Node.js-specific metadata from package.json analysis.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NodeInfo {
     pub name: String,
     pub version: String,
@@ -166,7 +168,7 @@ pub struct NodeInfo {
 /// Packaging information for the project — how to build and distribute
 /// the final artifact. Detected by analyzing package.json build configs,
 /// VSCode extension manifests, and binary staging scripts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PackagingInfo {
     /// Type of packager (e.g. "vsce", "npm", "docker", "python-wheels")
     pub packager_type: String,
@@ -184,7 +186,7 @@ pub struct PackagingInfo {
 
 
 /// A workspace member entry (backward compat).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkspaceMember {
     pub name: String,
     pub path: String,
@@ -192,7 +194,7 @@ pub struct WorkspaceMember {
 }
 
 /// A build target (backward compat).  
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BuildTarget {
     pub name: String,
     pub kind: Vec<String>,
@@ -200,7 +202,7 @@ pub struct BuildTarget {
 }
 
 /// A dependency entry (backward compat).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Dependency {
     pub name: String,
     pub version: String,
@@ -213,8 +215,31 @@ pub struct Dependency {
 
 
 /// MCP server capability mapping.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpServerCapability {
     pub name: String,
     pub capabilities: Vec<String>,
+}
+
+impl Default for BuildMetadata {
+    fn default() -> Self {
+        Self {
+            project_name: None,
+            project_type: String::new(),
+            build_system: String::new(),
+            version: None,
+            is_workspace: false,
+            workspace_members: Vec::new(),
+            scripts: Vec::new(),
+            features: Vec::new(),
+            targets: Vec::new(),
+            config_files: Vec::new(),
+            raw: None,
+            build_types: Vec::new(),
+            entry_points: Vec::new(),
+            dependencies: Vec::new(),
+            node_scripts: Vec::new(),
+            workspace_member_paths: Vec::new(),
+        }
+    }
 }
