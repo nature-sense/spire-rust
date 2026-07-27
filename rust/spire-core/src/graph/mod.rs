@@ -19,6 +19,7 @@ use selene_db_core::property_map::PropertyMap;
 use selene_db_core::value::{Value, VectorValue};
 use selene_db_core::vector::VectorMetric;
 use selene_db_graph::shared::SharedGraph;
+use selene_db_graph::write_txn::WriteTxn;
 use selene_db_graph::store::RowIndex;
 use selene_db_graph::vector_index::VectorIndexKind;
 use selene_db_graph::vector_search::VectorNodeSearchHit;
@@ -26,6 +27,9 @@ use selene_db_persist::{
     SectionCompression, SnapshotConfig, SnapshotFinalizeOutcome, WalConfig, find_latest_snapshot,
     snapshot_path,
 };
+
+/// Type for SeleneDB write transactions.
+pub type GraphDbTransaction = WriteTxn<'static>;
 
 /// A node in the graph database (low-level representation).
 #[derive(Debug, Clone)]
@@ -405,6 +409,14 @@ impl GraphDb {
     }
 
     /// Rebuild all vector indexes.
+    pub fn begin_transaction(&self) -> Result<GraphDbTransaction> {
+        self.shared.begin_write().map_err(|e| anyhow::anyhow!("begin_transaction failed: {}", e))
+    }
+
+    pub fn exact_vector_search_nodes(&self, _query: &[f32], _limit: usize) -> Result<Vec<(String, f64)>> {
+        Err(anyhow::anyhow!("not implemented"))
+    }
+
     pub fn rebuild_vector_indexes(&self) -> Result<()> {
         self.shared
             .rebuild_vector_indexes()
@@ -424,6 +436,10 @@ impl GraphDb {
     /// Execute a raw GQL query.
     pub fn execute_gql_query(&self, _gql: &str) -> Result<Vec<serde_json::Value>> {
         Err(anyhow::anyhow!("execute_gql_query not implemented on this GraphDb wrapper"))
+    }
+
+    pub fn resolve_node_properties(&self, _id: NodeId) -> Result<Option<Value>> {
+        Err(anyhow::anyhow!("not implemented"))
     }
 
     pub fn clear(&self) -> Result<()> {

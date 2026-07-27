@@ -21,7 +21,7 @@ pub fn parse_cargo(project_root: &Path) -> Option<BuildMetadata> {
     if let Some(cargo_info) = crate::analyzer::rust_analyzer::analyze_rust_project(project_root) {
         let is_workspace = !cargo_info.workspace_members.is_empty();
 
-        let workspace_members: Vec<WorkspaceMember> = cargo_info
+        let workspace_members: Vec<String> = cargo_info
             .workspace_members
             .iter()
             .map(|m| WorkspaceMember {
